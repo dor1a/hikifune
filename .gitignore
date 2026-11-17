@@ -1,0 +1,5 @@
+/hikifune
+/hikifune-agent
+/dist/
+*.test
+.env

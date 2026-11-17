@@ -126,8 +126,8 @@ Proposed order. Each milestone ends when its "Done when" holds. v0.1.0 is M0 to 
 
 ### M0. Skeleton
 
-- Settle the repository layout (open question 1).
-- `go.mod`, `cmd/hikifune`, `cmd/hikifune-agent`, `internal/`, one Dockerfile with a server target and an agent target, `.env.example`.
+- Settle the repository layout (open question 1, decided: one repository).
+- `go.mod`, `cmd/hikifune`, `cmd/hikifune-agent`, `internal/`, one Dockerfile with a server target and an agent target, a Makefile that runs Go in a container, `deploy/compose/.env.example`.
 - GitHub Actions: `go vet`, `go test` and both image builds on every push. Images go to GHCR on tags only.
 - Before tugtainer is removed, record everything useful from it: the web UI, the Discord message format and template variables, the agent API, the database structure and its logs.
 
@@ -219,7 +219,7 @@ Done when: a week of scheduled runs with no failure left unexplained, and the ol
 
 | # | Question | Notes |
 | -- | -- | -- |
-| 1 | Repository layout | Recommended: one repository, below |
+| 1 | Repository layout | Decided: one repository, below |
 | 2 | How the server and agents connect | Which side dials the other, and how they authenticate (per-agent token or mTLS). tugtainer's server dialed its agents |
 | 3 | Rollback window | P11 proposes 2 minutes |
 | 4 | Web UI sign-in | OIDC in the app, or left to a reverse proxy |
@@ -231,17 +231,21 @@ Done when: a week of scheduled runs with no failure left unexplained, and the ol
 
 ### Repository layout
 
-Recommended: the agent and the server in this one repository.
+Decided: the agent and the server in this one repository, laid out like the author's other Go services.
 
 ```
 hikifune/
   cmd/hikifune/         server
   cmd/hikifune-agent/   agent
+  internal/buildinfo/   the version both binaries carry
   internal/protocol/    messages both sides use
   internal/docker/      Engine API client, pinned to API 1.43
   internal/registry/    digest checks and registry auth
   internal/labels/      hikifune.* label parsing
+  deploy/compose/       .env.example, and later the install, dev and e2e compose files
+  docs/                 this plan, and later the architecture
   Dockerfile            two build targets, server and agent
+  Makefile              test, vet, fmt and image builds in containers
 ```
 
 - The two sides have to speak the same protocol, and a mismatch is what broke one tugtainer host. With one repository, one tag builds both images from the same commit, and the server can refuse an agent from another version and name both versions.
