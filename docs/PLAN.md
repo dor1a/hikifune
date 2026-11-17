@@ -229,6 +229,24 @@ Done when: a week of scheduled runs with no failure left unexplained, and the ol
 | 7 | Credential helpers | Whether `credsStore` and `credHelpers` in `config.json` are supported, or only `auths` |
 | 8 | Image platforms | amd64 and arm64 |
 | 9 | Logo | Draft A (tow) is preferred, not final. The social preview drafts still say "opted in with compose labels", which no longer matches R4. Drafts are in [docs/logo](logo/) |
+| 10 | Recreate containers, or commit to Git and let the agent apply it | Decide before M3. See [GitOps option](#gitops-option) |
+
+### GitOps option
+
+The plan so far updates containers outside Git: the agent recreates a container from its inspect output (R9 to R14). The hosts this replaces keep their compose files in a Git repository, applied by hand, so an update by hikifune leaves Git behind the running state.
+
+The other way is to make hikifune work like Argo CD for compose:
+
+| | Recreate (current plan) | Commit and apply |
+| -- | -- | -- |
+| Update | The agent recreates the container from its inspect output | The server commits the new image digest or tag to the compose repository, and the agent pulls and runs `docker compose up -d` for the stacks that changed |
+| M3 | The hardest part: config copy, comparison, rename, watch, rollback | Mostly `docker compose`, plus the watch and a revert commit when the new container fails |
+| Rollback | Restore the renamed old container | Revert the commit and apply again |
+| Drift | Not seen | The agent compares running containers with the repository and reports or corrects the difference |
+| Needs | Nothing new | Image references pinned in the repository (no bare `latest`), write access to the repository, secrets kept out of Git (host `.env` files, or encrypted) |
+| Not covered | Nothing | Containers that are not in a compose file |
+
+M1 and M2 serve both ways. The choice changes M3 and M4, so it has to be made before M3.
 
 ### Repository layout
 
