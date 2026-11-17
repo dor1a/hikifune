@@ -1,0 +1,34 @@
+name: hikifune-e2e
+
+# Two throwaway Docker daemons for the integration tests: the oldest release
+# hikifune supports and the current one. Nothing here touches the Docker that
+# runs them. `make e2e` starts them, fills them from e2e/containers.sh and runs
+# the tests on this project's network; `make e2e-down` removes everything.
+services:
+  docker24:
+    image: docker:24-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    healthcheck:
+      test:
+        - CMD
+        - docker
+        - info
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  docker29:
+    image: docker:29-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    healthcheck:
+      test:
+        - CMD
+        - docker
+        - info
+      interval: 2s
+      timeout: 5s
+      retries: 60

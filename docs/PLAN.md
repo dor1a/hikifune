@@ -148,6 +148,7 @@ Done when: inventory runs against Docker 24 and the current Docker release, and 
 - Registry auth: anonymous, basic and bearer token through `WWW-Authenticate`.
 - `HEAD` the manifest with the OCI index, Docker manifest list and single manifest media types, and read `Docker-Content-Digest`. Nothing is pulled.
 - Compare it with the local image's repo digest for the same repository. A locally built image without a repo digest is reported as not checkable.
+- An empty repo digest list is not enough to spot a local build. The M1 tests showed that the containerd image store (the default on new Docker 29 installs) gives a never-pushed local build a repo digest for its own name, while Docker 24 leaves the list empty. A registry that answers 404 or 401 for the repository has to be reported as not checkable too, not as a failure.
 
 Done when: unit tests pass against a fake registry for every auth type and media type, and live checks against Docker Hub and GHCR (public and private) agree with what `docker pull` reports.
 

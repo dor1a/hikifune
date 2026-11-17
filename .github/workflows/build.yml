@@ -31,6 +31,16 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  # Docker 24 and 29 in Docker-in-Docker, from deploy/compose/compose.e2e.yaml.
+  e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make e2e
+      - if: always()
+        run: make e2e-down
+
   # Go cross-compiles in the build stage and the final stages only copy files,
   # so arm64 needs no QEMU.
   image:
