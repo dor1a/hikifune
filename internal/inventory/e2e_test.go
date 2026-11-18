@@ -61,6 +61,7 @@ func checkE2E(t *testing.T, rep Report) {
 		{"created", false, false, "created"},
 		{"exited", false, false, "exited"},
 		{"local-build", false, false, "running"},
+		{"tag-moved", false, false, "running"},
 	}
 	if len(rep.Containers) != len(want) {
 		t.Errorf("%d containers, want %d", len(rep.Containers), len(want))
@@ -80,8 +81,14 @@ func checkE2E(t *testing.T, rep Report) {
 		if ct.State != w.state {
 			t.Errorf("%s: state = %q, want %q", w.name, ct.State, w.state)
 		}
-		if ct.ImageID == "" || ct.ImageError != "" {
+		// The containerd store (Docker 29) drops the record of a local image
+		// rebuilt under the same name, so tag-moved may have an image error.
+		if ct.ImageID == "" || (ct.ImageError != "" && w.name != "tag-moved") {
 			t.Errorf("%s: image id %q, image error %q", w.name, ct.ImageID, ct.ImageError)
+		}
+		// Only tag-moved runs an image its reference no longer names.
+		if ct.TagMoved != (w.name == "tag-moved") {
+			t.Errorf("%s: tag moved = %v", w.name, ct.TagMoved)
 		}
 	}
 
@@ -101,6 +108,7 @@ func checkE2E(t *testing.T, rep Report) {
 		}
 	}
 	t.Logf("local-build repo digests: %v", l.RepoDigests)
+	t.Logf("tag-moved image error: %q", byName["tag-moved"].ImageError)
 	if w := byName["compose-web"]; w.ComposeProject != "demo" || w.ComposeService != "web" {
 		t.Errorf("compose-web: project %q, service %q", w.ComposeProject, w.ComposeService)
 	}

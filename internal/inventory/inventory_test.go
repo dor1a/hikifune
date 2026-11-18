@@ -59,17 +59,23 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func TestCollect(t *testing.T) {
 	f := &fakeEngine{
-		listed: []string{"c-web", "c-guard", "c-typo", "c-orphan", "c-gone", "c-local"},
+		listed: []string{"c-web", "c-guard", "c-typo", "c-orphan", "c-gone", "c-local", "c-moved"},
 		containers: map[string]string{
 			"c-web":    `{"Id":"c-web","Name":"/demo-web-1","Image":"sha256:nginx","Config":{"Image":"nginx:1.27","Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"web"}},"State":{"Status":"running","Health":{"Status":"healthy"}}}`,
 			"c-guard":  `{"Id":"c-guard","Name":"/proxy","Image":"sha256:nginx","Config":{"Image":"nginx:1.27","Labels":{"hikifune.protected":"true"}},"State":{"Status":"running"}}`,
 			"c-typo":   `{"Id":"c-typo","Name":"/typo","Image":"sha256:nginx","Config":{"Image":"nginx:1.27","Labels":{"hikifune.protected":"ture"}},"State":{"Status":"exited"}}`,
 			"c-orphan": `{"Id":"c-orphan","Name":"/orphan","Image":"sha256:deleted","Config":{"Image":"old:1","Labels":null},"State":{"Status":"created"}}`,
 			"c-local":  `{"Id":"c-local","Name":"/local","Image":"sha256:built","Config":{"Image":"local/built:1","Labels":{}},"State":{"Status":"running"}}`,
+			"c-moved":  `{"Id":"c-moved","Name":"/moved","Image":"sha256:caddy-old","Config":{"Image":"caddy:2-alpine","Labels":{}},"State":{"Status":"running"}}`,
 		},
 		images: map[string]string{
 			"sha256:nginx": `{"Id":"sha256:nginx","RepoTags":["nginx:1.27"],"RepoDigests":["nginx@sha256:aaa"]}`,
 			"sha256:built": `{"Id":"sha256:built","RepoTags":["local/built:1"],"RepoDigests":[]}`,
+			// A later pull moved caddy:2-alpine; the old image kept nothing.
+			"sha256:caddy-old": `{"Id":"sha256:caddy-old","RepoTags":[],"RepoDigests":[]}`,
+			"nginx:1.27":       `{"Id":"sha256:nginx","RepoTags":["nginx:1.27"],"RepoDigests":["nginx@sha256:aaa"]}`,
+			"local/built:1":    `{"Id":"sha256:built","RepoTags":["local/built:1"],"RepoDigests":[]}`,
+			"caddy:2-alpine":   `{"Id":"sha256:caddy-new","RepoTags":["caddy:2-alpine"],"RepoDigests":["caddy@sha256:bbb"]}`,
 		},
 	}
 	srv := httptest.NewServer(f)
@@ -93,7 +99,7 @@ func TestCollect(t *testing.T) {
 		names = append(names, ct.Name)
 		byName[ct.Name] = ct
 	}
-	if got := strings.Join(names, ","); got != "demo-web-1,local,orphan,proxy,typo" {
+	if got := strings.Join(names, ","); got != "demo-web-1,local,moved,orphan,proxy,typo" {
 		t.Fatalf("names = %s (the removed container must be left out, the rest sorted)", got)
 	}
 
@@ -114,12 +120,20 @@ func TestCollect(t *testing.T) {
 	if o.ImageError == "" || o.RepoDigests == nil || len(o.RepoDigests) != 0 || o.Labels == nil {
 		t.Errorf("orphan = %+v", o)
 	}
-	if l := byName["local"]; l.RepoDigests == nil || len(l.RepoDigests) != 0 || l.ImageError != "" {
+	if l := byName["local"]; l.RepoDigests == nil || len(l.RepoDigests) != 0 || l.ImageError != "" || l.TagMoved {
 		t.Errorf("local = %+v", l)
 	}
-	// nginx is used by three containers but inspected once; plus built and deleted.
-	if n := f.imageCalls.Load(); n != 3 {
-		t.Errorf("image inspects = %d, want 3", n)
+	if m := byName["moved"]; !m.TagMoved || len(m.RepoDigests) != 0 {
+		t.Errorf("moved = %+v, want the tag marked as moved", m)
+	}
+	if web.TagMoved || o.TagMoved {
+		t.Errorf("tag moved on web %v or orphan %v", web.TagMoved, o.TagMoved)
+	}
+	// By ID: nginx once for three containers, built, deleted and caddy-old.
+	// By reference: nginx:1.27 once, local/built:1, caddy:2-alpine and the
+	// orphan's old:1, which names nothing any more.
+	if n := f.imageCalls.Load(); n != 8 {
+		t.Errorf("image inspects = %d, want 8", n)
 	}
 
 	b, err := json.Marshal(rep)

@@ -39,19 +39,24 @@ type Docker struct {
 
 // Container is one container on the host.
 type Container struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	ComposeProject string            `json:"compose_project,omitempty"`
-	ComposeService string            `json:"compose_service,omitempty"`
-	Image          string            `json:"image"`
-	ImageID        string            `json:"image_id"`
-	RepoDigests    []string          `json:"repo_digests"`
-	ImageError     string            `json:"image_error,omitempty"`
-	Labels         map[string]string `json:"labels"`
-	Protected      bool              `json:"protected"`
-	LabelError     string            `json:"label_error,omitempty"`
-	State          string            `json:"state"`
-	Health         string            `json:"health,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	ComposeProject string   `json:"compose_project,omitempty"`
+	ComposeService string   `json:"compose_service,omitempty"`
+	Image          string   `json:"image"`
+	ImageID        string   `json:"image_id"`
+	RepoDigests    []string `json:"repo_digests"`
+	ImageError     string   `json:"image_error,omitempty"`
+	// TagMoved means Image now names another image on this host than the one
+	// the container runs: a later pull or build moved the tag, and the
+	// container was not recreated. With the containerd image store the old
+	// image is left with no repo digest at all.
+	TagMoved   bool              `json:"tag_moved,omitempty"`
+	Labels     map[string]string `json:"labels"`
+	Protected  bool              `json:"protected"`
+	LabelError string            `json:"label_error,omitempty"`
+	State      string            `json:"state"`
+	Health     string            `json:"health,omitempty"`
 }
 
 // Collect reads every container on the daemon, stopped ones too. It only
@@ -149,10 +154,25 @@ func describe(ctx context.Context, c *docker.Client, images *imageCache, id stri
 	case img.RepoDigests != nil:
 		item.RepoDigests = img.RepoDigests
 	}
+	// Asked even when the container's image is gone: with the containerd
+	// store, rebuilding a local image under the same name drops the old
+	// image's record while the container still runs it.
+	if item.Image != "" && item.Image != ct.Image {
+		named, err := images.get(ctx, item.Image)
+		switch {
+		case docker.IsNotFound(err):
+			// The reference names no image here any more.
+		case err != nil:
+			return Container{}, false, err
+		default:
+			item.TagMoved = named.ID != ct.Image
+		}
+	}
 	return item, true, nil
 }
 
-// imageCache inspects each image once, however many containers use it.
+// imageCache inspects each image once, however many containers use it. It is
+// keyed by what was asked for, an image ID or a reference.
 type imageCache struct {
 	client  *docker.Client
 	mu      sync.Mutex

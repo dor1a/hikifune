@@ -27,6 +27,11 @@ docker run --name exited "$IMAGE" true
 printf 'FROM %s\nLABEL built=locally\n' "$IMAGE" | docker build -q -t local/built:1 - >/dev/null
 docker run -d --name local-build local/built:1 sleep 1d >/dev/null
 
+# A second build under the same name moves the tag; the container keeps the first.
+printf 'FROM %s\nLABEL built=first\n' "$IMAGE" | docker build -q -t local/moving:1 - >/dev/null
+docker run -d --name tag-moved local/moving:1 sleep 1d >/dev/null
+printf 'FROM %s\nLABEL built=second\n' "$IMAGE" | docker build -q -t local/moving:1 - >/dev/null
+
 i=0
 until [ "$(docker inspect -f '{{.State.Health.Status}}' healthy)" = healthy ]; do
   i=$((i + 1))

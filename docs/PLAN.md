@@ -149,6 +149,7 @@ Done when: inventory runs against Docker 24 and the current Docker release, and 
 - `HEAD` the manifest with the OCI index, Docker manifest list and single manifest media types, and read `Docker-Content-Digest`. Nothing is pulled.
 - Compare it with the local image's repo digest for the same repository. A locally built image without a repo digest is reported as not checkable.
 - An empty repo digest list is not enough to spot a local build. The M1 tests showed that the containerd image store (the default on new Docker 29 installs) gives a never-pushed local build a repo digest for its own name, while Docker 24 leaves the list empty. A registry that answers 404 or 401 for the repository has to be reported as not checkable too, not as a failure.
+- A container can run an image its reference no longer names: a later pull or build moved the tag and the container was not recreated. The live checks found one on a Docker 29 host. With the containerd store, a pulled image left behind keeps no repo digest, and a local image rebuilt under the same name loses its image record while the container still runs it. The inventory marks these `tag_moved`, and the check reports update available when the registry has the reference, not checkable when it does not.
 
 Done when: unit tests pass against a fake registry for every auth type and media type, and live checks against Docker Hub and GHCR (public and private) agree with what `docker pull` reports.
 
@@ -156,6 +157,7 @@ Done when: unit tests pass against a fake registry for every auth type and media
 
 - The seven steps above, the config builder (P1) and the comparison (P2).
 - The watch (P11) and rollback (R11).
+- With the containerd store, a local build gets a repo digest for its own name (M2). If that name also exists on a registry, M2 reports an update, and recreating would replace the local build with the registry's image. Decide how M3 tells such a container apart before it updates one.
 - Integration tests on Docker 24 and the current release:
 
 | Case | Expected |
@@ -226,7 +228,7 @@ Done when: a week of scheduled runs with no failure left unexplained, and the ol
 | 4 | Web UI sign-in | OIDC in the app, or left to a reverse proxy |
 | 5 | Where the server keeps state | SQLite, or a JSON file trimmed to the last N runs |
 | 6 | What else `protected` turns off | R4 turns off automatic updates. Still open: whether a protected container is checked (so the UI shows an available update) and whether Update now is refused for it, as tugtainer did. The 17 containers that were check-only in tugtainer were all access paths (VPN, socket proxy, tunnel, agents) |
-| 7 | Credential helpers | Whether `credsStore` and `credHelpers` in `config.json` are supported, or only `auths` |
+| 7 | Credential helpers | Whether `credsStore` and `credHelpers` in `config.json` are supported, or only `auths`. M2 reads `auths` only; when a registry refuses an image whose credentials sit in a helper, the reason names the helper |
 | 8 | Image platforms | amd64 and arm64 |
 | 9 | Logo | Draft A (tow) is preferred, not final. The social preview drafts still say "opted in with compose labels", which no longer matches R4. Drafts are in [docs/logo](logo/) |
 | 10 | Recreate containers, or commit to Git and let the agent apply it | Decide before M3. See [GitOps option](#gitops-option) |
