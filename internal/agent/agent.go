@@ -32,9 +32,9 @@ const (
 	maxBody  = 1 << 20
 )
 
-// jobLimit is how long a job may take beyond its watch: pull, stop and
+// JobLimit is how long a job may take beyond its watch: pull, stop and
 // rollback. The server waits five minutes more, so it sees the job end.
-var jobLimit = 25 * time.Minute
+const JobLimit = 25 * time.Minute
 
 // Config is what an agent needs.
 type Config struct {
@@ -53,6 +53,7 @@ type Config struct {
 type Agent struct {
 	token string
 	watch time.Duration
+	limit time.Duration // JobLimit, shorter in tests
 	base  context.Context
 	now   func() time.Time
 
@@ -83,7 +84,7 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		cfg.Watch = update.DefaultWatch
 	}
 	d, reg, auth := cfg.Docker, cfg.Registry, cfg.Auth
-	a := &Agent{token: cfg.Token, watch: cfg.Watch, base: ctx, now: time.Now}
+	a := &Agent{token: cfg.Token, watch: cfg.Watch, limit: JobLimit, base: ctx, now: time.Now}
 	a.version = func(ctx context.Context) protocol.Version {
 		v := protocol.Version{Agent: buildinfo.Version}
 		dv, err := d.CheckAPI(ctx)
@@ -206,7 +207,7 @@ func (a *Agent) startUpdate(w http.ResponseWriter, r *http.Request) {
 // its labels may say something else now. The update then goes by ID, so it
 // can only ever touch the container the check saw.
 func (a *Agent) run(container, id string, watch time.Duration) update.Result {
-	ctx, cancel := context.WithTimeout(a.base, watch+jobLimit)
+	ctx, cancel := context.WithTimeout(a.base, watch+a.limit)
 	defer cancel()
 	target := container
 	if id != "" {

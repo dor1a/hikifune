@@ -25,7 +25,7 @@ const token = "0123456789abcdef0123456789abcdef"
 func fakeAgent(t *testing.T) (*Agent, chan struct{}, *httptest.Server) {
 	t.Helper()
 	release := make(chan struct{})
-	a := &Agent{token: token, watch: time.Minute, base: context.Background(), now: time.Now,
+	a := &Agent{token: token, watch: time.Minute, limit: JobLimit, base: context.Background(), now: time.Now,
 		version: func(context.Context) protocol.Version {
 			return protocol.Version{Agent: "v1", Docker: &inventory.Docker{Version: "29.1.0", APIVersion: "1.52"}}
 		},
@@ -156,11 +156,8 @@ func TestUpdateRefusesBadRequestsAndRecreatedContainers(t *testing.T) {
 // A job that hangs, as on a pull that never ends, ends at its limit and
 // frees the host.
 func TestAJobHasALimit(t *testing.T) {
-	old := jobLimit
-	jobLimit = 50 * time.Millisecond
-	defer func() { jobLimit = old }()
 	a, _, srv := fakeAgent(t)
-	a.watch = time.Millisecond
+	a.watch, a.limit = time.Millisecond, 50*time.Millisecond
 	a.update = func(ctx context.Context, name string, _ time.Duration) update.Result {
 		<-ctx.Done()
 		return update.Result{Container: name, Outcome: update.Failed, Reason: "pull: " + ctx.Err().Error()}
@@ -180,6 +177,7 @@ func TestAJobHasALimit(t *testing.T) {
 	if code, _ := call(t, srv, "POST", protocol.PathUpdates, auth, `{"container":"db"}`); code != http.StatusAccepted {
 		t.Fatalf("the host stayed busy: %d", code)
 	}
+	a.Wait()
 }
 
 // A prune and an update never run at the same time on a host.

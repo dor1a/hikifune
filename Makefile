@@ -1,13 +1,19 @@
 GO_IMAGE ?= golang:1.26-alpine
+# The race detector needs cgo, which the alpine image lacks; CI runs it too.
+GO_RACE_IMAGE ?= golang:1.26
 VERSION  ?= $(shell git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo dev)
 DOCKER_GO = docker run --rm \
 	-v hikifune-gomod:/go/pkg/mod -v hikifune-gocache:/root/.cache/go-build \
 	-v "$(CURDIR):/src" -w /src $(GO_IMAGE)
 
-.PHONY: test vet fmt fmt-check tidy image
+.PHONY: test race vet fmt fmt-check tidy image
 
 test:
 	$(DOCKER_GO) go test ./...
+
+race:
+	docker run --rm -v hikifune-gomod:/go/pkg/mod -v hikifune-gocache-race:/root/.cache/go-build \
+		-v "$(CURDIR):/src" -w /src $(GO_RACE_IMAGE) go test -race ./...
 
 vet:
 	$(DOCKER_GO) go vet ./...
