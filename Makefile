@@ -36,7 +36,8 @@ e2e:
 	$(E2E) up -d --wait
 	for h in $(E2E_HOSTS); do \
 		$(E2E) exec -T $$h sh -s < deploy/compose/e2e/containers.sh || exit 1; \
-		$(E2E) exec -T $$h sh -s < deploy/compose/e2e/update.sh || exit 1; \
+		$(E2E) exec -T -e E2E_NS=e2e-$$h $$h sh -s < deploy/compose/e2e/update.sh || exit 1; \
+		$(E2E) exec -T -e E2E_NS=e2e-$$h $$h sh -s < deploy/compose/e2e/server.sh || exit 1; \
 	done
 	docker run --rm --network hikifune-e2e_default \
 		-v hikifune-gomod:/go/pkg/mod -v hikifune-gocache:/root/.cache/go-build \

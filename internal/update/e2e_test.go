@@ -5,7 +5,6 @@ package update
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -42,37 +41,15 @@ func TestE2EUpdate(t *testing.T) {
 	}
 }
 
-// optFor watches long enough for a health check every second to settle.
-// The test registry inside each daemon speaks plain HTTP, which the registry
-// client refuses, so the check asks it for the tag's digest directly and
-// answers update available; the check itself has unit tests.
-func optFor(host string) Options {
-	daemon := strings.TrimPrefix(host, "tcp://")
-	daemon, _, _ = strings.Cut(daemon, ":")
+// testRegistries are the names of the shared test registry in
+// deploy/compose/compose.e2e.yaml, which speaks plain HTTP.
+var testRegistries = []string{"registry:5000", "registry-v2:5000"}
+
+// optFor watches long enough for a health check every second to settle and
+// asks the test registry through the real registry check.
+func optFor(string) Options {
 	return Options{Watch: 8 * time.Second, Poll: 500 * time.Millisecond,
-		Check: func(ctx context.Context, t registry.Target) registry.Result {
-			ref, err := registry.ParseReference(t.Image)
-			if err != nil {
-				return registry.Result{Status: registry.Failed, Reason: err.Error()}
-			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodHead,
-				"http://"+daemon+":5000/v2/"+ref.Repository+"/manifests/"+ref.Tag, nil)
-			if err != nil {
-				return registry.Result{Status: registry.Failed, Reason: err.Error()}
-			}
-			req.Header.Set("Accept", strings.Join([]string{
-				"application/vnd.oci.image.index.v1+json",
-				"application/vnd.docker.distribution.manifest.list.v2+json",
-				"application/vnd.docker.distribution.manifest.v2+json",
-				"application/vnd.oci.image.manifest.v1+json",
-			}, ", "))
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return registry.Result{Status: registry.Failed, Reason: err.Error()}
-			}
-			resp.Body.Close()
-			return registry.Result{Status: registry.UpdateAvailable, RemoteDigest: resp.Header.Get("Docker-Content-Digest")}
-		}}
+		Check: registry.New(nil, nil).PlainHTTP(testRegistries).Check}
 }
 
 type inspected struct {

@@ -401,3 +401,41 @@ func TestUnparsedRedirectStaysOutOfErrors(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A registry set to plain HTTP is asked over HTTP and never gets credentials.
+func TestPlainHTTPRegistry(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		if r.URL.Path == "/v2/team/open/manifests/1" {
+			w.Header().Set("Docker-Content-Digest", digestA)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="x"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	keys := &Keychain{auths: map[string]Credentials{host: {"alice", "s3cret"}}}
+	c := New(keys, nil).PlainHTTP([]string{host})
+	open, _ := ParseReference(host + "/team/open:1")
+	if d, err := c.Digest(context.Background(), open); err != nil || d != digestA {
+		t.Fatalf("digest %q, %v", d, err)
+	}
+	locked, _ := ParseReference(host + "/team/locked:1")
+	_, err := c.Digest(context.Background(), locked)
+	if !IsNotCheckable(err) || auth != "" {
+		t.Fatalf("err %v, sent Authorization %q", err, auth)
+	}
+	// Not even an anonymous bearer token goes there.
+	anon := New(nil, nil).PlainHTTP([]string{host})
+	if _, err := anon.Digest(context.Background(), locked); !IsNotCheckable(err) || auth != "" {
+		t.Fatalf("anonymous: err %v, sent Authorization %q", err, auth)
+	}
+	if !c.Plain(host) || c.Plain("ghcr.io") {
+		t.Fatal("Plain")
+	}
+	if _, err := New(keys, nil).Digest(context.Background(), open); err == nil {
+		t.Fatal("asked over https by default, a plain server must not answer")
+	}
+}

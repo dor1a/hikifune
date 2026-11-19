@@ -445,3 +445,15 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 		t.Fatal("the redirect was followed")
 	}
 }
+
+func TestImagesPrune(t *testing.T) {
+	c, calls := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ImagesDeleted":[{"Deleted":"sha256:1"}],"SpaceReclaimed":5000000}`)
+	})
+	n, err := c.ImagesPrune(context.Background())
+	got := (*calls)[0]
+	if err != nil || n != 5000000 || got.method != "POST" || got.path != "/v1.43/images/prune" ||
+		got.query != "filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D" {
+		t.Fatalf("reclaimed %d, %v, call %+v", n, err, got)
+	}
+}

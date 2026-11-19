@@ -1,13 +1,37 @@
 name: hikifune-e2e
 
-# Two throwaway Docker daemons for the integration tests: the oldest release
-# hikifune supports and the current one. Nothing here touches the Docker that
-# runs them. `make e2e` starts them, fills them from e2e/containers.sh and runs
-# the tests on this project's network; `make e2e-down` removes everything.
+# Two throwaway Docker daemons for the integration tests, the oldest release
+# hikifune supports and the current one, and a registry both push to and
+# pull from over plain HTTP. The registry answers to two names, so a test can
+# push a second version under the same tag while the daemon keeps the first
+# one under the name its containers use. Nothing here touches the Docker that
+# runs them. `make e2e` starts them, fills them from the e2e/*.sh scripts and
+# runs the tests on this project's network; `make e2e-down` removes everything.
 services:
+  registry:
+    image: registry:3
+    networks:
+      default:
+        aliases:
+          - registry-v2
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:5000/v2/
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   docker24:
     image: docker:24-dind
     privileged: true
+    command:
+      - --insecure-registry=registry:5000
+      - --insecure-registry=registry-v2:5000
     environment:
       DOCKER_TLS_CERTDIR: ""
     healthcheck:
@@ -22,6 +46,9 @@ services:
   docker29:
     image: docker:29-dind
     privileged: true
+    command:
+      - --insecure-registry=registry:5000
+      - --insecure-registry=registry-v2:5000
     environment:
       DOCKER_TLS_CERTDIR: ""
     healthcheck:

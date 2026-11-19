@@ -33,6 +33,7 @@ type fakeEngine struct {
 	pulled     bool
 	named      string // image ID the reference names before the pull
 	oldGone    bool   // the old image is no longer on the host
+	oldRef     string // replaces the old container's image reference
 
 	checked registry.Target // what the registry check was asked
 	check   registry.Result // what it answers
@@ -138,6 +139,9 @@ func (f *fakeEngine) ContainerInspect(ctx context.Context, id string) (docker.Co
 		}
 		ct["State"] = map[string]any{"Status": status, "Running": f.oldRunning}
 		ct["HostConfig"].(map[string]any)["AutoRemove"] = f.autoRemove
+		if f.oldRef != "" {
+			ct["Config"].(map[string]any)["Image"] = f.oldRef
+		}
 		return toContainer(f.t, ct), nil
 	case "new":
 		cfg := map[string]any{}
@@ -356,6 +360,7 @@ func TestRunRefusesBeforeTouchingAnything(t *testing.T) {
 		{"a leftover new container", func(f *fakeEngine) { f.names["apps-web-1-hikifune-new"] = "stray" }, "left from an earlier update"},
 		{"a leftover old container", func(f *fakeEngine) { f.names["apps-web-1-hikifune-old"] = "stray" }, "left from an earlier update"},
 		{"no such container", func(f *fakeEngine) { delete(f.names, "apps-web-1") }, "inspect"},
+		{"hikifune itself", func(f *fakeEngine) { f.oldRef = "ghcr.io/dor1a/hikifune-agent:0.1" }, "own containers"},
 	}
 	for _, tt := range tests {
 		f := newFake(t)

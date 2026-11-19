@@ -41,11 +41,11 @@ func TestE2EInventory(t *testing.T) {
 
 func checkE2E(t *testing.T, rep Report) {
 	t.Helper()
-	// The update tests' containers carry hikifune.e2e=update and change
-	// while this runs.
+	// The update and server tests' containers carry a hikifune.e2e label
+	// and change while this runs.
 	byName := map[string]Container{}
 	for _, ct := range rep.Containers {
-		if ct.Labels["hikifune.e2e"] != "update" {
+		if ct.Labels["hikifune.e2e"] == "" {
 			byName[ct.Name] = ct
 		}
 	}

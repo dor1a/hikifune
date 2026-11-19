@@ -35,7 +35,7 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R1 | One agent per Docker host and one server that holds the schedule, the web UI, the notifications and the state |
 | R2 | The agent reaches the Docker Engine API through a socket proxy or the socket itself. It needs `VERSION`, `PING`, `INFO`, `CONTAINERS`, `IMAGES`, `NETWORKS` and `POST` |
 | R3 | Works with Engine API 1.43 (Docker 24) and newer. The agent talks to each daemon at the daemon's own API version. Creating a container at an older version drops or changes settings a newer daemon has (health check start interval, per-network MAC address and gateway priority, umask, recursive read-only mounts), and inspecting at a version before 1.45 adds the container's short ID to its network aliases |
-| R4 | A container with no `hikifune.*` label is checked and updated automatically. `hikifune.protected=true` turns automatic updates off |
+| R4 | A container with no `hikifune.*` label is checked and updated automatically. `hikifune.protected=true` turns automatic updates off; a protected container is still checked, so its available update shows in the notification and the web UI |
 | R5 | The web UI lists every container on every host, protected ones too |
 | R6 | Checks run daily at 00:00 and updates at 01:00 by default, in the configured time zone |
 | R7 | A check compares the registry digest of the container's image reference with the local image |
@@ -57,18 +57,21 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R23 | The step 3 comparison checks what hikifune sent, not the whole inspect output: every value sent is in the new container, it runs the pulled image, every network is attached, and every mount of the old container is in the new one. Defaults the new image adds are expected to differ |
 | R24 | A scheduled update is rolled back when the new container exits, restarts or reports unhealthy within the watch window, or when it has a health check and is not healthy at the end of the window. The window is 2 minutes, one server setting |
 | R25 | When the registry digest differs from the host's, the check also asks the registry for the host's digest (or, for an image that lost its repo digest, its image ID). If the registry does not have it, the image was built on the host (or its manifest was deleted there), and the container is reported not checkable instead of update available, so a local build is never replaced by a registry image of the same name. The same goes for a moved tag that now names a local build |
+| R26 | The server dials each agent, as Prometheus does its targets. Every operation is the server asking at a time it chooses, so request and answer fit; an agent is up when it answers. The agent listens on an address set for it (a tailnet or LAN address) and accepts only requests that carry its own token. Encryption is left to the network. An agent that dials out can be added later with the same messages |
+| R27 | The server keeps its state (run records, the failed digest list, settings, agents) in JSON files behind a store interface, run records trimmed to the last N runs. Files are written to a temporary file and renamed. At this size (about 200 bytes per container per run) a month of runs is about a megabyte; SQLite can replace the store when it grows |
+| R28 | hikifune never recreates its own server or agent containers, which it knows by an image repository named `hikifune` or `hikifune-agent`. It shows their available updates. An agent that stops itself mid-update cannot roll back |
+| R29 | Dependencies are updated before the containers that depend on them, using the `com.docker.compose.depends_on` label within a compose project. This avoids restarting an app against a database that is about to restart |
+| R30 | Configuration is through `HIKIFUNE_*` environment variables. Every key is listed in `.env.example`, even when empty. Agents and their tokens are added with `hikifune agent add`, which writes them to the server state |
+| R31 | The server keeps a run history (the last N runs) with each container's result and reason. The web UI and the notification come from the same record |
+| R32 | The server starts an update on an agent and gets a job number back, then asks for the job until it is done. A dropped connection loses no result, and an agent takes one job at a time, which keeps one update at a time on a host (R13) |
 
 ### Proposed
 
 | ID | Proposal | Why |
 | -- | -- | -- |
 | P3 | **Check now** for a host or all hosts, and **Update now** for one container, in the web UI. Manual updates do not roll back automatically (R14) | A fix often should not wait for 01:00 |
-| P4 | hikifune never recreates its own server or agent containers. It shows their available updates | An agent that stops itself mid-update cannot roll back |
-| P5 | Update dependencies before the containers that depend on them, using the `com.docker.compose.depends_on` label when it is present | Avoids restarting an app against a database that is about to restart |
 | P6 | A check-only switch per host | For the first days on a host, and for hosts where updates should wait |
 | P7 | The Docker and registry clients are written on `net/http` without the Docker SDK | Few dependencies, and the API version stays under our control |
-| P8 | Configuration through `HIKIFUNE_*` environment variables. Every key is listed in `.env.example`, even when empty | One place to see every setting |
-| P9 | The server keeps a run history (the last N runs) with each container's result and reason | The web UI and the notification come from the same record |
 | P10 | A **Send test** button for the notification template | Template edits are checked without waiting for a run |
 
 ### Not doing
@@ -196,9 +199,14 @@ Done when: every case passes on both Docker versions, and a real GPU container k
 
 ### M4. Agent API and server core
 
-- `internal/protocol` and the version handshake (R16). Connection and auth (open question 2).
+- `internal/protocol` and the version handshake (R16). The server dials each agent with its token (R26).
 - Agent endpoints: version, inventory, check, update one container, prune.
-- Server: agent list, scheduler with time zone, run records (P9), the skip list for failed digests (R15), dependency order (P5), state storage (open question 5).
+- Server: agent list, scheduler with time zone, run records (R31), the skip list for failed digests (R15), dependency order (R29), state storage in JSON (R27).
+- `hikifune-agent` with no command serves the API on `HIKIFUNE_AGENT_LISTEN` (`:8870`) and needs `HIKIFUNE_AGENT_TOKEN`. `hikifune agent add <name> <url>` makes the token and prints it once; `hikifune run check|update` runs once now.
+- Registries in `HIKIFUNE_INSECURE_REGISTRIES` are asked over plain HTTP, like Docker's insecure-registries, and never get credentials, neither in the check nor in the pull.
+- `hikifune-agent update` is a command for trying an update by hand. It runs outside the agent's one-job-at-a-time rule, so it is not meant for a host while a run is going.
+- After an update run, a host where something was updated prunes its dangling images, and the run record keeps the space reclaimed for the notification (M6).
+- Integration tests: one shared registry for both test daemons, and the server driving one agent per daemon over HTTP.
 
 Done when: a scheduled run against two Docker-in-Docker hosts checks both, updates one container at a time, records every result, and skips a failed digest at the next run.
 
@@ -245,11 +253,11 @@ Done when: a week of scheduled runs with no failure left unexplained, and the ol
 | # | Question | Notes |
 | -- | -- | -- |
 | 1 | Repository layout | Decided: one repository, below |
-| 2 | How the server and agents connect | Which side dials the other, and how they authenticate (per-agent token or mTLS). tugtainer's server dialed its agents |
+| 2 | How the server and agents connect | Decided: the server dials each agent, like Prometheus, and authenticates with a token per agent (R26) |
 | 3 | Rollback window | Decided: 2 minutes (R24) |
 | 4 | Web UI sign-in | OIDC in the app, or left to a reverse proxy |
-| 5 | Where the server keeps state | SQLite, or a JSON file trimmed to the last N runs |
-| 6 | What else `protected` turns off | R4 turns off automatic updates. Still open: whether a protected container is checked (so the UI shows an available update) and whether Update now is refused for it, as tugtainer did. The 17 containers that were check-only in tugtainer were all access paths (VPN, socket proxy, tunnel, agents) |
+| 5 | Where the server keeps state | Decided: JSON files behind a store interface (R27) |
+| 6 | What else `protected` turns off | Decided: it is still checked and shown (R4). Whether Update now is refused for it is left to M5 |
 | 7 | Credential helpers | Whether `credsStore` and `credHelpers` in `config.json` are supported, or only `auths`. M2 reads `auths` only; when a registry refuses an image whose credentials sit in a helper, the reason names the helper |
 | 8 | Image platforms | amd64 and arm64 |
 | 9 | Logo | Draft A (tow) is preferred, not final. The social preview drafts still say "opted in with compose labels", which no longer matches R4. Drafts are in [docs/logo](logo/) |

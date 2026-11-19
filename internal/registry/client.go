@@ -41,6 +41,8 @@ type Client struct {
 
 	mu    sync.Mutex
 	auths map[string]cachedAuth // by registry/repository
+
+	plain map[string]bool // registries asked over plain HTTP
 }
 
 type cachedAuth struct {
@@ -62,6 +64,23 @@ func New(keys *Keychain, hc *http.Client) *Client {
 	own.CheckRedirect = httpsRedirectsOnly
 	return &Client{hc: &own, keys: keys, now: time.Now, auths: map[string]cachedAuth{}}
 }
+
+// PlainHTTP makes the client ask these registries (host[:port], as in an
+// image reference) over plain HTTP, like the insecure-registries setting of
+// the Docker daemon. Credentials are never sent to them. It returns c.
+func (c *Client) PlainHTTP(registries []string) *Client {
+	c.plain = map[string]bool{}
+	for _, r := range registries {
+		if r = strings.ToLower(strings.TrimSpace(r)); r != "" {
+			c.plain[r] = true
+		}
+	}
+	return c
+}
+
+// Plain reports whether a registry is asked over plain HTTP. A pull from it
+// must not carry credentials either.
+func (c *Client) Plain(registry string) bool { return c.plain[strings.ToLower(registry)] }
 
 // httpsRedirectsOnly refuses a redirect to anything but https, so a request
 // that carries credentials is never sent again in plain text, and refuses to
@@ -157,7 +176,11 @@ func (c *Client) Has(ctx context.Context, ref Reference, digest string) (bool, e
 // answered once with the credentials the registry's WWW-Authenticate asks
 // for: basic auth, or a bearer token from its token server.
 func (c *Client) manifest(ctx context.Context, ref Reference, reference string) (*http.Response, error) {
-	target := "https://" + apiHost(ref.Registry) + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(reference)
+	scheme := "https"
+	if c.plain[ref.Registry] {
+		scheme = "http"
+	}
+	target := scheme + "://" + apiHost(ref.Registry) + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(reference)
 	key := ref.Name()
 	resp, err := c.head(ctx, target, c.cached(key))
 	if err != nil {
@@ -165,6 +188,10 @@ func (c *Client) manifest(ctx context.Context, ref Reference, reference string) 
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		return resp, nil
+	}
+	if c.plain[ref.Registry] {
+		return nil, &StatusError{Name: key, Status: http.StatusUnauthorized,
+			Message: "the registry is asked over plain HTTP, so nothing that authenticates is sent to it"}
 	}
 	ch, ok := challengeOf(resp.Header)
 	if !ok {

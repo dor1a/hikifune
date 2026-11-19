@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -51,6 +52,9 @@ type Result struct {
 	Reason     string  `json:"reason,omitempty"`
 	OldImageID string  `json:"old_image_id,omitempty"`
 	NewImageID string  `json:"new_image_id,omitempty"`
+	// Digest is the registry digest the update went for, as its registry
+	// check saw it. A failed update skips this digest next time (R15).
+	Digest string `json:"digest,omitempty"`
 	// OldImageRemoved is set when nothing else used the old image and it was removed.
 	OldImageRemoved bool `json:"old_image_removed,omitempty"`
 	// Note reports something left behind by an update that otherwise passed.
@@ -118,6 +122,9 @@ func run(ctx context.Context, e engine, name string, opt Options) Result {
 	}
 	if old.HostConfig.AutoRemove {
 		return fail("created with --rm: stopping it would remove it and leave nothing to roll back to")
+	}
+	if IsSelf(old.Config.Image) {
+		return fail("hikifune does not recreate its own containers")
 	}
 	newID, ok := prepare(ctx, e, old, opt, &r)
 	if !ok {
@@ -216,6 +223,7 @@ func prepare(ctx context.Context, e engine, old docker.Container, opt Options, r
 		return fail("no registry check was given")
 	}
 	c := opt.Check(ctx, t)
+	r.Digest = c.RemoteDigest
 	switch c.Status {
 	case registry.UpdateAvailable:
 	case registry.UpToDate:
@@ -499,4 +507,18 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// selfImages are the image repositories of hikifune itself (R28).
+var selfImages = map[string]bool{"hikifune": true, "hikifune-agent": true}
+
+// IsSelf reports whether an image reference names hikifune's own server or
+// agent image, wherever it is hosted. Such a container is never recreated:
+// an agent that stops itself mid-update cannot roll back.
+func IsSelf(image string) bool {
+	ref, err := registry.ParseReference(image)
+	if err != nil {
+		return false
+	}
+	return selfImages[path.Base(ref.Repository)]
 }

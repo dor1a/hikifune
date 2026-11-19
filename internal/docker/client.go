@@ -564,3 +564,14 @@ func readPullStream(r io.Reader) error {
 func (c *Client) ImageRemove(ctx context.Context, id string) error {
 	return c.do(ctx, request{method: http.MethodDelete, path: "/images/" + url.PathEscape(id)})
 }
+
+// ImagesPrune removes dangling images, the ones no tag names and no
+// container uses, and returns the space it reclaimed in bytes.
+func (c *Client) ImagesPrune(ctx context.Context) (int64, error) {
+	var out struct {
+		SpaceReclaimed int64 `json:"SpaceReclaimed"`
+	}
+	err := c.do(ctx, request{method: http.MethodPost, path: "/images/prune",
+		query: url.Values{"filters": {`{"dangling":["true"]}`}}, out: &out})
+	return out.SpaceReclaimed, err
+}
