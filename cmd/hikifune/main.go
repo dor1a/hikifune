@@ -1,6 +1,6 @@
 // Command hikifune is the server: it dials every agent on a daily schedule
-// to check and update containers, and keeps the state. The web UI and the
-// notifications come later.
+// to check and update containers, keeps the state, and serves the web UI.
+// The notifications come later.
 //
 //	hikifune                         run the server (configured through HIKIFUNE_* variables)
 //	hikifune agent add <name> <url>  add an agent and print the token to give it
@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"syscall"
 	"text/tabwriter"
@@ -30,14 +31,17 @@ import (
 
 	_ "time/tzdata" // TZ works in images without zoneinfo
 
+	"github.com/dor1a/hikifune/internal/auth"
 	"github.com/dor1a/hikifune/internal/buildinfo"
+	"github.com/dor1a/hikifune/internal/protocol"
 	"github.com/dor1a/hikifune/internal/server"
 	"github.com/dor1a/hikifune/internal/store"
 	"github.com/dor1a/hikifune/internal/update"
+	"github.com/dor1a/hikifune/internal/web"
 )
 
 const (
-	defaultListen = ":8869"
+	defaultListen = ":7340"
 	defaultData   = "/data"
 )
 
@@ -121,16 +125,37 @@ func serve() error {
 	if err != nil {
 		return fmt.Errorf("HIKIFUNE_UPDATE_AT: %w", err)
 	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "ok")
-	})
-	srv := &http.Server{Addr: listenAddr(), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	authSettings, err := loadAuth(env)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	sched := &server.Schedule{Runner: r, CheckAt: checkAt, UpdateAt: updateAt, Location: loc}
+	sched := &server.Schedule{Runner: r, CheckAt: checkAt, UpdateAt: updateAt, Location: loc, Wake: make(chan struct{}, 1)}
+	cfg := web.Config{Store: r.Store, Runner: r, Schedule: sched, Wake: sched.Wake, Location: loc,
+		DefaultCheck: checkAt, DefaultUpdate: updateAt, Watch: r.Watch, Version: buildinfo.Version,
+		Base: ctx, Log: slog.Default(),
+		Status: func(ctx context.Context, a store.Agent) (protocol.Version, error) {
+			c, err := server.NewClient(a.URL, a.Token)
+			if err != nil {
+				return protocol.Version{}, err
+			}
+			return c.Version(ctx)
+		}}
+	if j, ok := r.Store.(*store.JSON); ok {
+		cfg.KeepRuns = j.KeepRuns()
+	}
+	if authSettings != nil {
+		cfg.Auth = auth.New(*authSettings, slog.Default())
+	} else {
+		slog.Warn("HIKIFUNE_AUTH=none: the web UI has no sign-in; listen only where the proxy in front reaches it")
+	}
+	pages, err := web.New(cfg)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Addr: listenAddr(), Handler: pages.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -162,6 +187,10 @@ func serve() error {
 	return nil
 }
 
+// agentName is what an agent may be called. The name goes into the web UI's
+// paths, so it has no slash or other character a path would need escaped.
+var agentName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+
 func agentCommand(args []string) error {
 	const usage = "use agent add <name> <url>, agent list or agent remove <name>"
 	if len(args) == 0 {
@@ -174,6 +203,9 @@ func agentCommand(args []string) error {
 	switch {
 	case args[0] == "add" && len(args) == 3:
 		name, url := args[1], args[2]
+		if !agentName.MatchString(name) {
+			return fmt.Errorf("agent name %q: use up to 63 letters, digits, dots, underscores and hyphens, starting with a letter or digit", name)
+		}
 		if _, err := server.NewClient(url, ""); err != nil {
 			return err
 		}

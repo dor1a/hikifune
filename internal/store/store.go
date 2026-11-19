@@ -22,12 +22,30 @@ type Agent struct {
 	URL   string    `json:"url"`
 	Token string    `json:"token"`
 	Added time.Time `json:"added"`
+	// CheckOnly keeps scheduled updates off the host; it is still checked,
+	// and Update now still works (P6).
+	CheckOnly bool `json:"check_only,omitempty"`
+}
+
+// Settings are what the web UI changes. Until it saves them, the server
+// runs on the values its environment gives.
+type Settings struct {
+	Saved    bool   `json:"saved"`
+	CheckAt  string `json:"check_at,omitempty"`
+	UpdateAt string `json:"update_at,omitempty"`
 }
 
 // Entry is one container in a run record (R31).
 type Entry struct {
 	Container string `json:"container"`
-	Image     string `json:"image"`
+	// ID is the container's ID at the check. Update now sends it back, so a
+	// container recreated since the page showed it is not updated.
+	ID    string `json:"id,omitempty"`
+	Image string `json:"image"`
+	State string `json:"state,omitempty"` // running, exited and so on, at the check
+	// Available is set when the check found a newer digest, whatever the
+	// run then did with it.
+	Available bool `json:"available,omitempty"`
 	// Status is the check status for a check run, and for an update run the
 	// update outcome, the check status of a container that was not updated,
 	// or "skipped" with the reason.
@@ -51,13 +69,25 @@ type HostRun struct {
 	Reclaimed    int64   `json:"reclaimed,omitempty"`
 }
 
+// Listed tells whether the host part holds a container list: it has
+// containers, or it found none and nothing went wrong.
+func (h HostRun) Listed() bool {
+	return len(h.Containers) > 0 || h.Skipped == "" && h.Error == ""
+}
+
 // Run is one check or update run.
 type Run struct {
-	ID       string    `json:"id"`
-	Kind     string    `json:"kind"`
-	Started  time.Time `json:"started"`
-	Finished time.Time `json:"finished"`
-	Hosts    []HostRun `json:"hosts"`
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Manual names who started a run by hand in the web UI; empty for a
+	// scheduled run.
+	Manual string `json:"manual,omitempty"`
+	// Container is set on an update run by hand of one container; its
+	// record holds that container only.
+	Container string    `json:"container,omitempty"`
+	Started   time.Time `json:"started"`
+	Finished  time.Time `json:"finished"`
+	Hosts     []HostRun `json:"hosts"`
 }
 
 // Failure is a digest whose update failed; the next run skips it (R15).
@@ -71,9 +101,10 @@ type Failure struct {
 
 // State is everything the server keeps.
 type State struct {
-	Agents []Agent
-	Runs   []Run // oldest first
-	Failed []Failure
+	Agents   []Agent
+	Runs     []Run // oldest first
+	Failed   []Failure
+	Settings Settings
 }
 
 // Store reads and changes the state.
@@ -85,9 +116,10 @@ type Store interface {
 }
 
 // JSON keeps the state in a directory: agents.json for the agents and
-// their tokens, and state.json for the runs and the failed digests, which
-// change together. Each is written to a temporary file and renamed, and only
-// when it changed.
+// their tokens, state.json for the runs and the failed digests, which change
+// together, and settings.json for what the web UI changes. Each is written
+// to a temporary file and renamed, and only when it changed. It keeps the
+// last keepRuns runs, and each host's newest container list besides.
 type JSON struct {
 	dir      string
 	keepRuns int
@@ -97,8 +129,9 @@ type JSON struct {
 const DefaultKeepRuns = 60
 
 const (
-	agentsFile = "agents.json"
-	stateFile  = "state.json"
+	agentsFile   = "agents.json"
+	stateFile    = "state.json"
+	settingsFile = "settings.json"
 )
 
 // runState is what state.json holds.
@@ -107,7 +140,7 @@ type runState struct {
 	Failed []Failure `json:"failed"`
 }
 
-// OpenJSON uses dir, creating it, and keeps the last keepRuns runs.
+// OpenJSON uses dir, creating it, and keeps the last keepRuns runs (see trim).
 func OpenJSON(dir string, keepRuns int) (*JSON, error) {
 	if keepRuns <= 0 {
 		keepRuns = DefaultKeepRuns
@@ -125,7 +158,7 @@ func (j *JSON) Read() (State, error) {
 	for _, f := range []struct {
 		name string
 		v    any
-	}{{agentsFile, &s.Agents}, {stateFile, &rs}} {
+	}{{agentsFile, &s.Agents}, {stateFile, &rs}, {settingsFile, &s.Settings}} {
 		b, err := os.ReadFile(filepath.Join(j.dir, f.name))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -158,15 +191,19 @@ func (j *JSON) Update(fn func(*State) error) error {
 		return err
 	}
 	agentsBefore, _ := json.Marshal(s.Agents)
+	settingsBefore, _ := json.Marshal(s.Settings)
 	stateBefore, _ := json.Marshal(runState{s.Runs, s.Failed})
 	if err := fn(&s); err != nil {
 		return err
 	}
-	if len(s.Runs) > j.keepRuns {
-		s.Runs = s.Runs[len(s.Runs)-j.keepRuns:]
-	}
+	s.Runs = trim(s.Runs, j.keepRuns, s.Agents)
 	if after, _ := json.Marshal(s.Agents); string(after) != string(agentsBefore) {
 		if err := j.write(agentsFile, s.Agents); err != nil {
+			return err
+		}
+	}
+	if after, _ := json.Marshal(s.Settings); string(after) != string(settingsBefore) {
+		if err := j.write(settingsFile, s.Settings); err != nil {
 			return err
 		}
 	}
@@ -177,6 +214,44 @@ func (j *JSON) Update(fn func(*State) error) error {
 	}
 	return nil
 }
+
+// trim keeps the last keep runs and, before them, the runs the containers
+// page still needs: for each agent, its newest run that listed its
+// containers and the updates by hand after it. A host keeps its list
+// however many updates by hand came after it.
+func trim(runs []Run, keep int, agents []Agent) []Run {
+	if len(runs) <= keep {
+		return runs
+	}
+	current := map[string]bool{}
+	for _, a := range agents {
+		current[a.Name] = true
+	}
+	need := make([]bool, len(runs))
+	listed := map[string]bool{}
+	for i := len(runs) - 1; i >= 0; i-- {
+		for _, h := range runs[i].Hosts {
+			if !current[h.Agent] || listed[h.Agent] || !h.Listed() {
+				continue
+			}
+			need[i] = true
+			if runs[i].Container == "" {
+				listed[h.Agent] = true
+			}
+		}
+	}
+	cut := len(runs) - keep
+	out := make([]Run, 0, keep)
+	for i, r := range runs {
+		if i >= cut || need[i] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// KeepRuns is how many runs make the history.
+func (j *JSON) KeepRuns() int { return j.keepRuns }
 
 func (j *JSON) write(name string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")

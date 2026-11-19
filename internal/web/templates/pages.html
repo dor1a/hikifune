@@ -1,0 +1,305 @@
+{{define "top" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false}'>
+<title>{{if .Title}}{{.Title}} · {{end}}hikifune</title>
+<link rel="icon" href="{{asset "favicon.svg"}}">
+<link rel="stylesheet" href="{{asset "style.css"}}">
+<script src="{{asset "mode.js"}}"></script>
+<script src="{{asset "htmx.min.js"}}" defer></script>
+</head>
+<body>
+{{if eq .Page "notice"}}
+<main class="solo">
+{{else}}
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="/"><img src="{{asset "favicon.svg"}}" alt="" width="28" height="28"><span>hikifune</span></a>
+  <nav class="side-nav" aria-label="Pages">
+    <a href="/"{{if eq .Page "containers"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5 12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9"/></svg>Containers</a>
+    <a href="/hosts"{{if eq .Page "hosts"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="6.5" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5"/><path d="M7 7.25h.01M7 16.75h.01"/></svg>Hosts</a>
+    <a href="/runs"{{if eq .Page "runs"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Runs</a>
+    <a href="/settings"{{if eq .Page "settings"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Settings</a>
+  </nav>
+  {{if .Nav}}<nav class="side-hosts" aria-label="Hosts">
+    <h3>Hosts</h3>
+    {{range .Nav}}<a href="/hosts/{{seg .Name}}"{{if eq .Name $.Host}} aria-current="page"{{end}} title="{{if eq .State "bad"}}its latest run left it out{{else if eq .State "never"}}not checked yet{{else}}{{.Available}} with an update{{end}}">
+      <span class="dot {{.State}}" aria-hidden="true"></span><span class="hn">{{.Name}}</span>{{if .CheckOnly}}<span class="tag">check only</span>{{end}}{{if .Available}}<span class="count">{{.Available}}</span>{{end}}
+    </a>{{end}}
+  </nav>{{end}}
+  <div class="side-foot">
+    {{with .User}}<div class="account">
+      <span class="who" title="Signed in as {{.Name}}">{{.Name}}</span>
+      <a class="icon-btn" href="{{.LogoutURL}}" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10"/></svg></a>
+    </div>{{end}}
+    <span class="muted small">hikifune {{.Version}}</span>
+  </div>
+</aside>
+<main class="content">
+{{template "activity" .}}
+{{end}}
+{{- end}}
+
+{{define "bottom" -}}
+</main>
+{{if ne .Page "notice"}}</div>{{end}}
+<button type="button" id="mode-toggle" class="mode-fab" hidden>
+  <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
+  <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg>
+</button>
+</body>
+</html>
+{{- end}}
+
+{{define "activity" -}}
+{{with .Activity}}
+{{if .Active}}
+<div id="activity" class="strip busy" hx-get="/activity?following=1" hx-trigger="every 2s" hx-swap="outerHTML" role="status">
+  <span class="spinner" aria-hidden="true"></span>
+  <span>{{if .Active.Spec.Container}}Updating {{.Active.Spec.Container}} on {{index .Active.Spec.Hosts 0}}{{else if eq .Active.Spec.Kind "check"}}Checking {{if .Active.Spec.Hosts}}{{index .Active.Spec.Hosts 0}}{{else}}every host{{end}}{{else}}Updating every host{{end}}{{with .Active.Spec.Manual}}, started by {{.}}{{end}}, since {{ago .Active.Started}}. The page reloads when it ends.</span>
+</div>
+{{else}}
+<div id="activity" class="strip" role="status">
+  <form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML">
+    <button type="submit" class="primary small">Check now</button>
+  </form>
+  {{with .Error}}<span class="msg bad">{{.}}</span>{{end}}
+  {{with .Notice}}<span class="msg">{{.}}</span>{{end}}
+</div>
+{{end}}
+{{end}}
+{{- end}}
+
+{{define "badge" -}}
+<span class="badge {{status .}}">{{words .}}</span>
+{{- end}}
+
+{{define "ctable" -}}
+<table class="list">
+  <thead><tr><th>Container</th>{{if .Host}}<th>Host</th>{{end}}<th>Status</th><th class="reason">Reason</th><th>Checked</th><th></th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+  <tr>
+    <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag" title="hikifune.protected: checked, never updated on schedule">protected</span>{{end}}{{if .Self}} <span class="tag">hikifune</span>{{end}}</div>
+      <div class="sub">{{.Image}}{{with .State}}{{if ne . "running"}} · {{.}}{{end}}{{end}}</div></td>
+    {{if $.Host}}<td><a href="/hosts/{{seg .Host}}">{{.Host}}</a></td>{{end}}
+    <td>{{template "badge" .Status}}{{if and .Pending (ne .Status "update_available")}} <span class="badge available" title="the check found a newer digest that is not on the container">update available</span>{{end}}</td>
+    <td class="reason">{{.Reason}}</td>
+    <td class="muted" title="{{local .At}}">{{ago .At}}</td>
+    <td class="act">{{if .CanUpdate}}<form hx-post="/actions/update" hx-target="#activity" hx-swap="outerHTML"{{if .Protected}} hx-confirm="{{.Container}} is protected, so it is never updated on schedule. Update it now anyway?"{{end}}>
+      <input type="hidden" name="host" value="{{.Host}}"><input type="hidden" name="container" value="{{.Container}}"><input type="hidden" name="id" value="{{.ID}}">
+      <button type="submit" class="small">Update now</button></form>{{end}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="{{if .Host}}6{{else}}5{{end}}" class="empty">No container matches.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{- end}}
+
+{{define "containers" -}}
+{{template "top" .}}
+{{with .Data}}
+<div class="page-head">
+  <h1 class="title">Containers</h1>
+  <div class="seg" role="group" aria-label="View">
+    <a href="{{.ByHostURL}}"{{if not .List}} aria-current="true"{{end}}>By host</a>
+    <a href="{{.ListURL}}"{{if .List}} aria-current="true"{{end}}>One list</a>
+  </div>
+</div>
+<form class="filters" method="get" action="/" hx-get="/" hx-target="body" hx-push-url="true" hx-trigger="change, submit">
+  {{if .List}}<input type="hidden" name="view" value="list">{{end}}
+  <label>Host
+    <select name="host">
+      <option value="">All hosts</option>
+      {{range .Hosts}}<option value="{{.Agent.Name}}"{{if eq .Agent.Name $.Data.Filter.Host}} selected{{end}}>{{.Agent.Name}}</option>{{end}}
+    </select>
+  </label>
+  <label>Status
+    <select name="status">
+      <option value="">Any</option>
+      {{range .Statuses}}<option value="{{.}}"{{if eq . $.Data.Filter.Status}} selected{{end}}>{{words .}}</option>{{end}}
+    </select>
+  </label>
+  <label class="check"><input type="checkbox" name="protected" value="1"{{if .Filter.Protected}} checked{{end}}> Protected only</label>
+  <input type="search" name="q" value="{{.Filter.Q}}" placeholder="Name or image" aria-label="Search">
+  <button type="submit" class="small">Filter</button>
+</form>
+
+{{if not .Hosts}}
+<div class="card empty">No agents yet. Add one on the server with <code>hikifune agent add &lt;name&gt; &lt;url&gt;</code>.</div>
+{{else if not .Checked}}
+{{range .Hosts}}{{if .Issue}}<p class="msg bad">{{.Agent.Name}}: {{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}{{end}}
+<div class="card empty">No check has run yet. Use Check now above.</div>
+{{else if .List}}
+{{range .Hosts}}{{if .Issue}}<p class="msg bad">{{.Agent.Name}}: {{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}{{end}}
+{{template "ctable" (rows .Rows true)}}
+<p class="muted small">{{.Shown}} of {{.Total}} containers.</p>
+{{else}}
+{{range .Groups}}
+<section class="group">
+  <div class="group-head">
+    <h2><a href="/hosts/{{seg .Agent.Name}}">{{.Agent.Name}}</a></h2>
+    {{if .Agent.CheckOnly}}<span class="tag">check only</span>{{end}}
+    <span class="muted small">{{with .Docker}}Docker {{.}} · {{end}}{{if .AsOf.IsZero}}no container list yet{{else}}{{len .Rows}} containers, {{.Available}} with an update · checked {{ago .AsOf}}{{end}}</span>
+  </div>
+  {{if .Issue}}<p class="msg bad">{{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}
+  {{if .Shown}}{{template "ctable" (rows .Shown false)}}
+  {{else if .AsOf.IsZero}}<div class="card empty">No container list yet.</div>
+  {{else if .Rows}}<div class="card empty">No container matches.</div>
+  {{else}}<div class="card empty">No containers on this host.</div>{{end}}
+</section>
+{{else}}
+<div class="card empty">No container matches.</div>
+{{end}}
+<p class="muted small">{{.Shown}} of {{.Total}} containers.</p>
+{{end}}
+{{end}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "hosts" -}}
+{{template "top" .}}
+<h1 class="title">Hosts</h1>
+{{with .Data}}
+{{with .Saved}}<p class="msg">Saved for {{.}}.</p>{{end}}
+{{if not .Hosts}}
+<div class="card empty">No agents yet. Add one on the server with <code>hikifune agent add &lt;name&gt; &lt;url&gt;</code>.</div>
+{{else}}
+<table class="list">
+  <thead><tr><th>Host</th><th>Now</th><th>Last run</th><th>Updates</th><th></th></tr></thead>
+  <tbody>
+  {{range .Hosts}}
+  <tr>
+    <td><div class="name"><a href="/hosts/{{seg .Agent.Name}}">{{.Agent.Name}}</a></div><div class="sub">{{.Agent.URL}}</div></td>
+    <td hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">asking…</span></td>
+    <td>{{if .Issue}}<span class="msg bad">{{.Issue}}</span> <span class="muted">{{ago .IssueAt}}</span>{{else if .AsOf.IsZero}}<span class="muted">never</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{ago .AsOf}}</span>{{end}}</td>
+    <td><form method="post" action="/hosts/{{seg .Agent.Name}}/check-only">
+      {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag">check only</span> <button type="submit" class="link">Turn updates on</button>
+      {{else}}<input type="hidden" name="on" value="1"><span class="muted">on schedule</span> <button type="submit" class="link">Check only</button>{{end}}
+    </form></td>
+    <td class="act"><form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML"><input type="hidden" name="host" value="{{.Agent.Name}}"><button type="submit" class="small">Check now</button></form></td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+<p class="muted small">A check-only host is checked on schedule but never updated then. Update now still works on it.</p>
+{{end}}
+{{end}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "host" -}}
+{{template "top" .}}
+{{with .Data}}{{with .View}}
+<div class="page-head">
+  <h1 class="title">{{.Agent.Name}} <span class="muted">{{.Agent.URL}}</span></h1>
+  <form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML"><input type="hidden" name="host" value="{{.Agent.Name}}"><button type="submit" class="small">Check this host</button></form>
+</div>
+{{if $.Data.Saved}}<p class="msg">Saved.</p>{{end}}
+<dl class="card facts">
+  <div><dt>Now</dt><dd hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">asking…</span></dd></div>
+  <div><dt>Container list</dt><dd>{{if .AsOf.IsZero}}<span class="muted">none yet</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{local .AsOf}}, {{ago .AsOf}}</span>{{end}}</dd></div>
+  <div><dt>Schedule</dt><dd><form method="post" action="/hosts/{{seg .Agent.Name}}/check-only"><input type="hidden" name="back" value="host">
+    {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag">check only</span> checked on schedule, never updated then <button type="submit" class="link">Turn updates on</button>
+    {{else}}<input type="hidden" name="on" value="1">checked and updated on schedule <button type="submit" class="link">Check only</button>{{end}}
+  </form></dd></div>
+</dl>
+{{if .Issue}}<p class="msg bad">{{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}
+{{if .AsOf.IsZero}}<div class="card empty">No container list yet. Use Check this host above.</div>
+{{else if .Rows}}{{template "ctable" (rows .Rows false)}}
+{{else}}<div class="card empty">No containers on this host.</div>{{end}}
+{{end}}{{end}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "hoststatus" -}}
+{{with .Data}}{{if .Error}}<span class="msg bad">{{.Error}}</span>{{else}}agent {{.Version.Agent}}{{with .Version.Docker}} · Docker {{.Version}}, API {{.APIVersion}}{{end}} <span class="muted">· {{.Took}}</span>{{end}}{{end}}
+{{- end}}
+
+{{define "runs" -}}
+{{template "top" .}}
+<h1 class="title">Runs</h1>
+<table class="list">
+  <thead><tr><th>Started</th><th>Run</th><th>Results</th><th>Took</th></tr></thead>
+  <tbody>
+  {{range .Data}}
+  <tr>
+    <td><a href="/runs/{{.ID}}">{{local .Started}}</a><div class="sub">{{ago .Started}}</div></td>
+    <td>{{.Kind}}{{with .Container}} of {{.}}{{end}}{{with .Manual}} <span class="tag">by {{.}}</span>{{end}}</td>
+    <td>{{range $k, $v := .Counts}}{{if or (eq $k "update_available") (eq $k "updated") (eq $k "rolled_back") (eq $k "failed")}}<span class="badge {{status $k}}">{{$v}} {{words $k}}</span> {{end}}{{end}}{{if .Issues}}<span class="badge bad">{{.Issues}} host{{if gt .Issues 1}}s{{end}} left out</span>{{end}}</td>
+    <td class="muted">{{took .Started .Finished}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="4" class="empty">No runs yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{template "bottom" .}}
+{{- end}}
+
+{{define "run" -}}
+{{template "top" .}}
+{{with .Data}}
+<h1 class="title">{{.Kind}} run{{with .Container}} of {{.}}{{end}} <span class="muted">{{local .Started}}{{with .Manual}}, by {{.}}{{end}}, took {{took .Started .Finished}}</span></h1>
+{{range .Hosts}}
+<section class="card host">
+  <h2>{{.Agent}} <span class="muted">{{with .AgentVersion}}agent {{.}}{{end}}{{with .Docker}} · Docker {{.}}{{end}}{{if .Reclaimed}} · reclaimed {{bytes .Reclaimed}}{{end}}</span></h2>
+  {{with .Skipped}}<p class="msg bad">Left out: {{.}}</p>{{end}}
+  {{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
+  {{if .Containers}}
+  <table class="list">
+    <thead><tr><th>Container</th><th>Status</th><th>Reason</th><th>Digest</th></tr></thead>
+    <tbody>
+    {{range .Containers}}
+    <tr>
+      <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag">protected</span>{{end}}</div><div class="sub">{{.Image}}</div></td>
+      <td>{{template "badge" .Status}}</td>
+      <td class="reason">{{.Reason}}</td>
+      <td class="muted mono">{{short .RemoteDigest}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{end}}
+</section>
+{{end}}
+{{end}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "settings" -}}
+{{template "top" .}}
+<h1 class="title">Settings</h1>
+{{with .Data}}
+{{if .Done}}<p class="msg">Saved. The schedule uses the new times now.</p>{{end}}
+{{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
+<form class="card settings" method="post" action="/settings">
+  <h2>Schedule</h2>
+  <p class="muted">Every day, in {{.Location}}. {{if .Saved}}Set here.{{else}}From the environment: check {{.DefaultCheck}}, update {{.DefaultUpdate}}.{{end}}</p>
+  <label>Check at <input type="time" name="check_at" value="{{.CheckAt}}" required></label>
+  <label>Update at <input type="time" name="update_at" value="{{.UpdateAt}}" required></label>
+  <p class="muted">Next check {{local .NextCheck}}, next update {{local .NextUpdate}}. Each updated container is watched for {{.Watch}}.</p>
+  <div class="buttons">
+    <button type="submit" class="primary">Save</button>
+    {{if .Saved}}<button type="submit" name="reset" value="1" class="link" formnovalidate>Use the environment's times</button>{{end}}
+  </div>
+</form>
+{{end}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "notice" -}}
+{{template "top" .}}
+{{with .Data}}
+<div class="card notice">
+  <h1>{{.Title}}</h1>
+  <p>{{.Text}}</p>
+  {{if .SignIn}}<p><a class="button primary" href="/login">Sign in</a></p>{{end}}
+</div>
+{{end}}
+{{template "bottom" .}}
+{{- end}}

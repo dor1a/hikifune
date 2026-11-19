@@ -94,6 +94,7 @@ type fakeHost struct {
 	jobErrs  int // asks for a job that fail before it answers
 	requests []protocol.UpdateRequest
 	onCheck  func()
+	onStart  func(container string)
 }
 
 func (h *fakeHost) Version(context.Context) (protocol.Version, error) { return h.version, h.versErr }
@@ -106,6 +107,9 @@ func (h *fakeHost) Check(context.Context) (protocol.CheckReport, error) {
 	return h.report, nil
 }
 func (h *fakeHost) StartUpdate(_ context.Context, req protocol.UpdateRequest) (protocol.Job, error) {
+	if h.onStart != nil {
+		h.onStart(req.Container)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.busyOnce {
@@ -164,7 +168,7 @@ func newRunner(t *testing.T, hosts map[string]*fakeHost) *Runner {
 	st.Update(func(s *store.State) error {
 		for _, n := range []string{"a", "b"} {
 			if hosts[n] != nil {
-				s.Agents = append(s.Agents, store.Agent{Name: n, URL: "http://" + n + ":8870", Token: "t"})
+				s.Agents = append(s.Agents, store.Agent{Name: n, URL: "http://" + n + ":7341", Token: "t"})
 			}
 		}
 		return nil
@@ -521,5 +525,316 @@ func TestARefusedJobBlocksNoDigest(t *testing.T) {
 	}
 	if st, _ := r.Store.Read(); len(st.Failed) != 0 {
 		t.Fatalf("failed = %+v", st.Failed)
+	}
+}
+
+// An update by hand goes to the one container asked for, whatever stops a
+// scheduled one, and records that container only.
+func TestUpdateByHand(t *testing.T) {
+	a := newHost()
+	guard := checked("guard", registry.UpdateAvailable, "sha256:g")
+	guard.Protected = true
+	a.report.Containers = []protocol.Checked{guard, checked("web", registry.UpdateAvailable, "sha256:w")}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	r.Store.Update(func(s *store.State) error {
+		s.Agents[0].CheckOnly = true
+		s.Failed = append(s.Failed, store.Failure{Agent: "a", Container: "guard", Digest: "sha256:g", Reason: "x"})
+		return nil
+	})
+	done := make(chan store.Run, 1)
+	err := r.Start(context.Background(), Spec{Kind: KindUpdate, Hosts: []string{"a"}, Container: "guard", ContainerID: "id-guard", Manual: "alice"},
+		func(run store.Run, err error) { done <- run })
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := <-done
+	if !slices.Equal(a.started, []string{"guard"}) || run.Manual != "alice" || run.Container != "guard" ||
+		len(run.Hosts[0].Containers) != 1 || run.Hosts[0].Containers[0].Status != "updated" {
+		t.Fatalf("started %v, run %+v", a.started, run)
+	}
+	if st, _ := r.Store.Read(); len(st.Failed) != 0 {
+		t.Errorf("the update did not clear the failure: %+v", st.Failed)
+	}
+	if err := r.Start(context.Background(), Spec{Kind: KindUpdate, Container: "web", ContainerID: "id-web"}, nil); err == nil {
+		t.Error("an update by hand without its host was taken")
+	}
+	if err := r.Start(context.Background(), Spec{Kind: KindUpdate, Hosts: []string{"a"}, Container: "web"}, nil); err == nil {
+		t.Error("an update by hand without the shown ID was taken")
+	}
+}
+
+// A container recreated since the page showed it is not updated by hand;
+// the record shows the new one, so the page can offer it again.
+func TestUpdateByHandOfARecreatedContainer(t *testing.T) {
+	a := newHost()
+	web := checked("web", registry.UpdateAvailable, "sha256:w")
+	web.ID = "id-replacement"
+	a.report.Containers = []protocol.Checked{web}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	done := make(chan store.Run, 1)
+	if err := r.Start(context.Background(), Spec{Kind: KindUpdate, Hosts: []string{"a"}, Container: "web", ContainerID: "id-web"},
+		func(run store.Run, err error) { done <- run }); err != nil {
+		t.Fatal(err)
+	}
+	run := <-done
+	e := entry(t, run.Hosts[0], "web")
+	if len(a.started) != 0 || e.ID != "id-replacement" || e.Status != "update_available" || !strings.Contains(e.Reason, "recreated since the page showed it") {
+		t.Fatalf("started %v, entry %+v", a.started, e)
+	}
+}
+
+// Turning check-only on during a scheduled run stops the updates still to
+// come on that host.
+func TestCheckOnlyTurnedOnDuringARun(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("one", registry.UpdateAvailable, "sha256:1"), checked("two", registry.UpdateAvailable, "sha256:2")}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	a.onStart = func(string) {
+		r.Store.Update(func(s *store.State) error {
+			s.Agents[0].CheckOnly = true
+			return nil
+		})
+	}
+	run, err := r.Run(context.Background(), KindUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.started) != 1 {
+		t.Fatalf("started %v", a.started)
+	}
+	if e := entry(t, run.Hosts[0], a.started[0]); e.Status != "updated" {
+		t.Errorf("first: %+v", e)
+	}
+	other := map[string]string{"one": "two", "two": "one"}[a.started[0]]
+	if e := entry(t, run.Hosts[0], other); e.Status != "skipped" || !strings.Contains(e.Reason, "turned on during the run") || !e.Available {
+		t.Errorf("second: %+v", e)
+	}
+}
+
+// A check-only switch turned on while the agent is busy with another job
+// keeps the waiting update from being sent.
+func TestCheckOnlyTurnedOnWhileTheAgentIsBusy(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	a.busyOnce = true
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	a.onStart = func(string) {
+		r.Store.Update(func(s *store.State) error {
+			s.Agents[0].CheckOnly = true
+			return nil
+		})
+	}
+	run, err := r.Run(context.Background(), KindUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := entry(t, run.Hosts[0], "web"); len(a.started) != 0 || e.Status != "skipped" || !strings.Contains(e.Reason, "turned on during the run") {
+		t.Fatalf("started %v, entry %+v", a.started, e)
+	}
+}
+
+// A host removed and added again under its name during a run is another
+// host: the run's failures do not reach it.
+func TestARunChangesNoFailureOfAHostAddedSince(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	a.outcomes["web"] = update.Result{Container: "web", Outcome: update.RolledBack, Reason: "exited", Digest: "sha256:w"}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	a.onStart = func(string) {
+		r.Store.Update(func(s *store.State) error {
+			s.Agents[0] = store.Agent{Name: "a", URL: "http://other:7341", Token: "t2", Added: time.Now().Add(time.Second)}
+			return nil
+		})
+	}
+	if _, err := r.Run(context.Background(), KindUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.Store.Read(); len(st.Failed) != 0 {
+		t.Fatalf("failures %+v", st.Failed)
+	}
+}
+
+// Changing one time while a run goes keeps the other kind's count: the
+// update due during a long check still starts after it.
+func TestScheduleKeepsAnOverdueRunWhenTheOtherTimeChanges(t *testing.T) {
+	a := newHost()
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	r.Store.Update(func(st *store.State) error {
+		st.Settings = store.Settings{Saved: true, CheckAt: "01:00", UpdateAt: "02:00"}
+		return nil
+	})
+	s := &Schedule{Runner: r, Location: time.UTC, Wake: make(chan struct{}, 1)}
+	now := time.Date(2026, 11, 19, 0, 59, 0, 0, time.UTC)
+	var mu sync.Mutex
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	// The 01:00 check lasts until 03:00, and meanwhile the check moves to
+	// 04:00. The update run checks too, so this happens once.
+	var once sync.Once
+	a.onCheck = func() {
+		once.Do(func() {
+			mu.Lock()
+			now = time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+			mu.Unlock()
+			r.Store.Update(func(st *store.State) error {
+				st.Settings.CheckAt = "04:00"
+				return nil
+			})
+			s.Wake <- struct{}{}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := true
+	s.now = clock
+	s.sleep = func(ctx context.Context, d time.Duration) error {
+		switch {
+		case d <= 0:
+			return nil
+		case first:
+			first = false
+			mu.Lock()
+			now = now.Add(d)
+			mu.Unlock()
+			return nil
+		}
+		cancel()
+		return context.Canceled
+	}
+	s.Loop(ctx)
+	st, _ := r.Store.Read()
+	var kinds []string
+	for _, run := range st.Runs {
+		kinds = append(kinds, run.Kind)
+	}
+	if strings.Join(kinds, " ") != "check update" {
+		t.Fatalf("runs %v", kinds)
+	}
+}
+
+// A run that waits while its time is changed does not start; the wake that
+// came with the change plans it at the new time.
+func TestScheduleLeavesARunWhoseTimeChanged(t *testing.T) {
+	a := newHost()
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	r.Store.Update(func(st *store.State) error {
+		st.Settings = store.Settings{Saved: true, CheckAt: "01:00", UpdateAt: "01:00"}
+		return nil
+	})
+	s := &Schedule{Runner: r, CheckAt: Clock{0, 0}, UpdateAt: Clock{1, 0}, Location: time.UTC, Wake: make(chan struct{}, 1)}
+	// The check on the same minute runs first; meanwhile the update is moved
+	// to 02:00, as the settings page does it.
+	a.onCheck = func() {
+		r.Store.Update(func(st *store.State) error {
+			st.Settings.UpdateAt = "02:00"
+			return nil
+		})
+		s.Wake <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Date(2026, 11, 19, 0, 59, 0, 0, time.UTC)
+	var waits []time.Duration
+	s.now = func() time.Time { return now }
+	s.sleep = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		switch len(waits) {
+		case 1:
+			now = now.Add(d)
+			return nil
+		case 2:
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		cancel()
+		return context.Canceled
+	}
+	s.Loop(ctx)
+	st, _ := r.Store.Read()
+	if len(st.Runs) != 1 || st.Runs[0].Kind != KindCheck {
+		t.Fatalf("runs %+v", st.Runs)
+	}
+	if len(waits) != 3 || waits[2] != time.Hour {
+		t.Fatalf("waits %v", waits)
+	}
+}
+
+// A check-only host is checked but not updated on schedule.
+func TestCheckOnlyHost(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	r.Store.Update(func(s *store.State) error {
+		s.Agents[0].CheckOnly = true
+		return nil
+	})
+	run, _ := r.Run(context.Background(), KindUpdate)
+	if e := entry(t, run.Hosts[0], "web"); e.Status != "skipped" || !strings.Contains(e.Reason, "check-only") || len(a.started) != 0 {
+		t.Fatalf("entry %+v", e)
+	}
+}
+
+// Start refuses at once while another run goes on.
+func TestStartWhileBusy(t *testing.T) {
+	a := newHost()
+	release := make(chan struct{})
+	a.onCheck = func() { <-release }
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	done := make(chan struct{})
+	if err := r.Start(context.Background(), Spec{Kind: KindCheck}, func(store.Run, error) { close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	if act := r.Active(); act == nil || act.Spec.Kind != KindCheck {
+		t.Fatalf("active %+v", act)
+	}
+	if err := r.Start(context.Background(), Spec{Kind: KindCheck}, nil); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second start: %v", err)
+	}
+	close(release)
+	<-done
+	if r.Active() != nil {
+		t.Error("still active after the run")
+	}
+}
+
+// Saved settings win over the environment, and saving wakes the loop.
+func TestScheduleFollowsTheSettings(t *testing.T) {
+	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
+	s := &Schedule{Runner: r, CheckAt: Clock{0, 0}, UpdateAt: Clock{1, 0}, Location: time.UTC, Wake: make(chan struct{}, 1)}
+	if c, u := s.Clocks(); c != (Clock{0, 0}) || u != (Clock{1, 0}) {
+		t.Fatalf("env clocks %v %v", c, u)
+	}
+	r.Store.Update(func(st *store.State) error {
+		st.Settings = store.Settings{Saved: true, CheckAt: "02:30", UpdateAt: "03:15"}
+		return nil
+	})
+	if c, u := s.Clocks(); c != (Clock{2, 30}) || u != (Clock{3, 15}) {
+		t.Fatalf("saved clocks %v %v", c, u)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var waits []time.Duration
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.sleep = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		if len(waits) == 1 {
+			s.Wake <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		cancel()
+		return context.Canceled
+	}
+	s.Loop(ctx)
+	// Woken while waiting for 02:30 tomorrow, it read the times again.
+	if len(waits) != 2 || waits[0] != 14*time.Hour+30*time.Minute {
+		t.Fatalf("waits %v", waits)
+	}
+	if st, _ := r.Store.Read(); len(st.Runs) != 0 {
+		t.Fatalf("a wake started a run: %+v", st.Runs)
 	}
 }

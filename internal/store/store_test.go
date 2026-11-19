@@ -20,7 +20,7 @@ func TestJSONRoundTrip(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC)
 	err = s.Update(func(st *State) error {
-		st.Agents = append(st.Agents, Agent{Name: "atsui", URL: "http://atsui:8870", Token: "t", Added: at})
+		st.Agents = append(st.Agents, Agent{Name: "atsui", URL: "http://atsui:7341", Token: "t", Added: at})
 		for i := range 5 {
 			st.Runs = append(st.Runs, Run{ID: string(rune('a' + i)), Kind: "check", Started: at})
 		}
@@ -111,5 +111,41 @@ func TestUpdateWritesOnlyWhatChanged(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(dir, "state.json"))
 	if !strings.Contains(string(b), `"id": "r"`) || !strings.Contains(string(b), `"digest": "sha256:1"`) {
 		t.Errorf("state.json = %s", b)
+	}
+}
+
+func TestTrimKeepsEachHostsLastList(t *testing.T) {
+	agents := []Agent{{Name: "a"}, {Name: "b"}}
+	listed := func(id string, hosts ...HostRun) Run { return Run{ID: id, Kind: "check", Hosts: hosts} }
+	byHand := func(id string) Run {
+		return Run{ID: id, Kind: "update", Container: "web", Hosts: []HostRun{{Agent: "a", Containers: []Entry{{Container: "web"}}}}}
+	}
+	runs := []Run{
+		listed("old", HostRun{Agent: "a", Containers: []Entry{{Container: "web"}}}, HostRun{Agent: "gone"}),
+		listed("b-list", HostRun{Agent: "a", Error: "agent unreachable"}, HostRun{Agent: "b"}),
+		listed("failed", HostRun{Agent: "a", Error: "check: x"}, HostRun{Agent: "b", Skipped: "version"}),
+		byHand("h1"), byHand("h2"),
+	}
+	var ids []string
+	for _, r := range trim(runs, 2, agents) {
+		ids = append(ids, r.ID)
+	}
+	// a's list is in "old", b's (empty, but listed) in "b-list"; "failed"
+	// listed nothing, and the removed agent "gone" keeps nothing.
+	if got := strings.Join(ids, " "); got != "old b-list h1 h2" {
+		t.Fatalf("kept %s", got)
+	}
+	if got := trim(runs[:2], 2, agents); len(got) != 2 {
+		t.Fatalf("under the limit: %d", len(got))
+	}
+
+	// The updates by hand after a host's list are kept with it: without
+	// them the page would show web as before its update.
+	runs = []Run{
+		listed("list", HostRun{Agent: "a", Containers: []Entry{{Container: "web"}, {Container: "other"}}}),
+		byHand("web"), byHand("other"),
+	}
+	if got := trim(runs, 1, agents); len(got) != 3 {
+		t.Fatalf("kept %d of the list and its updates by hand", len(got))
 	}
 }

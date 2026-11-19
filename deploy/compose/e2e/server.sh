@@ -50,8 +50,11 @@ docker run -d --name srv-web --label "$L" \
 docker run -d --name srv-bad --label "$L" "$REG/srvbad:1" >/dev/null
 docker run -d --name srv-guard --label "$L" --label hikifune.protected=true "$REG/srvguard:1" >/dev/null
 docker run -d --name srv-self --label "$L" "$REG/hikifune-agent:1" >/dev/null
+# The web tests update this one by hand; being protected keeps the server
+# tests' scheduled runs off it.
+docker run -d --name ui-guard --label "$L" --label hikifune.protected=true "$REG/srvguard:1" >/dev/null
 
-for c in srv-db srv-web srv-bad srv-guard srv-self; do
+for c in srv-db srv-web srv-bad srv-guard srv-self ui-guard; do
   if [ "$(docker inspect -f '{{.State.Running}}' "$c")" != true ]; then
     echo "$c is not running" >&2
     exit 1
