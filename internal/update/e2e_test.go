@@ -171,9 +171,18 @@ func e2eCases(ctx context.Context, t *testing.T, c *docker.Client, opt Options) 
 		if got := asJSON(after.at("Config", "Entrypoint")) + asJSON(after.at("Config", "Cmd")); got != `["/bin/sleep"]["2d"]` {
 			t.Errorf("entrypoint and command = %s", got)
 		}
-		if got := after.Config.Labels[composeImageLabel]; got != after.Image {
-			t.Errorf("compose label = %s, image %s", got, after.Image)
+		// The label holds what compose would write: the platform image's ID
+		// where the daemon can tell it, the image ID otherwise.
+		want := after.Image
+		if id, ok, err := c.ImagePlatformID(ctx, after.Image); err != nil {
+			t.Errorf("platform image of %s: %v", after.Image, err)
+		} else if ok {
+			want = id
 		}
+		if got := after.Config.Labels[composeImageLabel]; got != want {
+			t.Errorf("compose label = %s, want %s (image %s)", got, want, after.Image)
+		}
+		t.Logf("compose label %s, image %s", after.Config.Labels[composeImageLabel], after.Image)
 		mounts := func(i inspected) map[string]string {
 			m := map[string]string{}
 			for _, raw := range list(i.doc["Mounts"]) {

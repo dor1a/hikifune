@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -455,5 +456,33 @@ func TestImagesPrune(t *testing.T) {
 	if err != nil || n != 5000000 || got.method != "POST" || got.path != "/v1.43/images/prune" ||
 		got.query != "filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D" {
 		t.Fatalf("reclaimed %d, %v, call %+v", n, err, got)
+	}
+}
+
+func TestImagePlatformID(t *testing.T) {
+	var asked []string
+	daemon := func(api string) *Client {
+		return newRawTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/version" {
+				json.NewEncoder(w).Encode(map[string]string{"Version": "test", "ApiVersion": api, "MinAPIVersion": "1.12", "Os": "linux", "Arch": "amd64"})
+				return
+			}
+			asked = append(asked, r.URL.Path+"?"+r.URL.RawQuery)
+			json.NewEncoder(w).Encode(map[string]string{"Id": "sha256:platform"})
+		}))
+	}
+
+	id, ok, err := daemon("1.56").ImagePlatformID(context.Background(), "ghcr.io/a/b:1")
+	if err != nil || !ok || id != "sha256:platform" {
+		t.Fatalf("API 1.56: %q, %v, %v", id, ok, err)
+	}
+	want := "/v1.56/images/ghcr.io/a/b:1/json?platform=" + url.QueryEscape(`{"os":"linux","architecture":"amd64"}`)
+	if len(asked) != 1 || asked[0] != want {
+		t.Errorf("asked %v, want %s", asked, want)
+	}
+
+	asked = nil
+	if _, ok, err := daemon("1.43").ImagePlatformID(context.Background(), "ghcr.io/a/b:1"); ok || err != nil || len(asked) != 0 {
+		t.Errorf("API 1.43: ok %v, err %v, asked %v; want no request", ok, err, asked)
 	}
 }

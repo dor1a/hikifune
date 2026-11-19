@@ -119,7 +119,10 @@ docker start upd-nets >/dev/null
 
 docker run -d --name upd-web --label "$L" --label "$P" -p 18080:80 "$REG/web:1" >/dev/null
 
-app_id=$(docker image inspect -f '{{.Id}}' "$REG/app:1")
+# Compose keeps the platform image's ID on the containerd image store and the
+# image ID on the classic one. An older CLI has no --platform on inspect.
+app_id=$(docker image inspect -f '{{.Id}}' --platform "$(docker version -f '{{.Server.Os}}/{{.Server.Arch}}')" "$REG/app:1" 2>/dev/null) ||
+  app_id=$(docker image inspect -f '{{.Id}}' "$REG/app:1")
 docker run -d --name upd-app --label "$L" --label "$P" --label "com.docker.compose.image=$app_id" \
   -e KEEP=mine -e EXTRA=x -v upd-data:/data -v /srv/upd-bind:/bind:ro "$REG/app:1" >/dev/null
 

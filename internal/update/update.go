@@ -59,6 +59,10 @@ type Result struct {
 	OldImageRemoved bool `json:"old_image_removed,omitempty"`
 	// Note reports something left behind by an update that otherwise passed.
 	Note string `json:"note,omitempty"`
+
+	// labelNote waits for the update to pass: a new container that is rolled
+	// back takes its compose label with it.
+	labelNote string
 }
 
 // Options tune one update.
@@ -89,6 +93,7 @@ type engine interface {
 	ContainerRename(ctx context.Context, id, name string) error
 	ContainerRemove(ctx context.Context, id string, force bool) error
 	ImageRemove(ctx context.Context, id string) error
+	ImagePlatformID(ctx context.Context, ref string) (string, bool, error)
 }
 
 // Container updates one running container to the image its reference names
@@ -155,23 +160,70 @@ func run(ctx context.Context, e engine, name string, opt Options) Result {
 		return rollback(ctx, e, r, name, old.ID, newID, why)
 	}
 
-	// 7. Remove the old container and its image.
+	// 7. Remove the old container, and its image when no name is left on it.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepTimeout)
 	defer cancel()
 	r.Outcome = Updated
+	if r.labelNote != "" {
+		r.addNote(r.labelNote)
+	}
 	if err := e.ContainerRemove(ctx, old.ID, false); err != nil {
-		r.Note = "the old container " + name + oldSuffix + " was left: " + err.Error()
+		r.addNote("the old container " + name + oldSuffix + " was left: " + err.Error())
+		return r
+	}
+	// Removing an image by ID takes its last name with it, so an image
+	// another name still points at stays. The API has no remove-if-unnamed,
+	// so a name added between this inspect and the removal is lost.
+	switch img, err := e.ImageInspect(ctx, old.Image); {
+	case docker.IsNotFound(err):
+		return r
+	case err != nil:
+		r.addNote("the old image was left: " + err.Error())
+		return r
+	case len(img.RepoTags) > 0:
+		r.addNote("the old image was kept: it is still named " + strings.Join(img.RepoTags, ", "))
 		return r
 	}
 	switch err := e.ImageRemove(ctx, old.Image); {
 	case err == nil:
 		r.OldImageRemoved = true
 	case docker.IsConflict(err) || docker.IsNotFound(err):
-		// Another container or reference still uses it.
+		// Another container still uses it.
 	default:
-		r.Note = "the old image was left: " + err.Error()
+		r.addNote("the old image was left: " + err.Error())
 	}
 	return r
+}
+
+// addNote adds to the result's note.
+func (r *Result) addNote(s string) {
+	if r.Note != "" {
+		r.Note += "; "
+	}
+	r.Note += s
+}
+
+// composeLabel returns the value of the compose image label to replace and
+// its replacement (R22). Compose writes the image ID there on the classic
+// image store and the platform image's ID on the containerd store. A label
+// that matches neither is left as it is, with a note: compose will recreate
+// the container at its next up.
+func composeLabel(ctx context.Context, e engine, old docker.Container, newImageID string) (from, to, note string) {
+	label := old.Config.Labels[composeImageLabel]
+	if label == "" || label == old.Image {
+		return old.Image, newImageID, ""
+	}
+	left := "the compose label " + composeImageLabel + " was left at " + label +
+		", so the next docker compose up may recreate the container"
+	oldID, ok, err := e.ImagePlatformID(ctx, old.Image)
+	if err != nil || !ok || oldID != label {
+		return old.Image, newImageID, left
+	}
+	newID, ok, err := e.ImagePlatformID(ctx, newImageID)
+	if err != nil || !ok {
+		return old.Image, newImageID, left
+	}
+	return label, newID, ""
 }
 
 // prepare runs steps 1 to 3: it pulls, builds the new configuration, and
@@ -257,7 +309,9 @@ func prepare(ctx context.Context, e engine, old docker.Container, opt Options, r
 	}
 
 	// 2. Build the new configuration.
-	s, err := build(old.Raw, oldImg.Raw, old.Image, newImg.ID)
+	from, to, note := composeLabel(ctx, e, old, newImg.ID)
+	r.labelNote = note
+	s, err := build(old.Raw, oldImg.Raw, from, to)
 	if err != nil {
 		return fail("build the new configuration: %v", err)
 	}

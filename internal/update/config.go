@@ -18,8 +18,9 @@ import (
 )
 
 // composeImageLabel holds the ID of the image compose created a container
-// from. Compose recreates a container whose label differs from the image it
-// would run.
+// from: the image ID on the classic image store, the platform image's ID on
+// the containerd store. Compose recreates a container whose label differs
+// from the image it would run.
 const composeImageLabel = "com.docker.compose.image"
 
 // imageDefaults are the Config fields a container takes from its image as a
@@ -79,9 +80,9 @@ func decode(raw []byte) (map[string]any, error) {
 }
 
 // build makes the spec of the new container from the old container's and its
-// image's inspect documents. oldImageID and newImageID are the image IDs the
-// old container runs and the pull brought.
-func build(container, oldImage []byte, oldImageID, newImageID string) (spec, error) {
+// image's inspect documents. A compose image label equal to fromLabel becomes
+// toLabel (see composeLabel).
+func build(container, oldImage []byte, fromLabel, toLabel string) (spec, error) {
 	ct, err := decode(container)
 	if err != nil {
 		return spec{}, fmt.Errorf("read the container: %w", err)
@@ -106,8 +107,8 @@ func build(container, oldImage []byte, oldImageID, newImageID string) (spec, err
 
 	setList(cfg, "Env", without(cfg["Env"], imgCfg["Env"]))
 	labels := withoutPairs(cfg["Labels"], imgCfg["Labels"])
-	if labels != nil && labels[composeImageLabel] == oldImageID {
-		labels[composeImageLabel] = newImageID
+	if labels != nil && labels[composeImageLabel] == fromLabel {
+		labels[composeImageLabel] = toLabel
 	}
 	setObject(cfg, "Labels", labels)
 	setObject(cfg, "ExposedPorts", withoutKeys(cfg["ExposedPorts"], imgCfg["ExposedPorts"]))

@@ -457,6 +457,48 @@ func (c *Client) ImageInspect(ctx context.Context, ref string) (Image, error) {
 	return img, nil
 }
 
+// platformAPI is the first Engine API version whose image inspect takes a
+// platform query.
+const platformAPI = "1.49"
+
+// ImagePlatformID returns the ID image inspect gives for the daemon's own
+// platform within ref. On the containerd image store that is the platform
+// image, where a plain inspect gives the index; it is the value compose keeps
+// in its com.docker.compose.image label. ok is false when the daemon serves
+// an API older than 1.49, which has no platform query.
+func (c *Client) ImagePlatformID(ctx context.Context, ref string) (id string, ok bool, err error) {
+	v, err := c.version(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if cmp, err := CompareAPIVersions(v, platformAPI); err != nil || cmp < 0 {
+		return "", false, err
+	}
+	sv, err := c.ServerVersion(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	platform, err := json.Marshal(struct {
+		OS           string `json:"os"`
+		Architecture string `json:"architecture"`
+	}{sv.Os, sv.Arch})
+	if err != nil {
+		return "", false, err
+	}
+	var out struct {
+		ID string `json:"Id"`
+	}
+	err = c.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(ref) + "/json",
+		query: url.Values{"platform": {string(platform)}}, out: &out})
+	if err != nil {
+		return "", false, err
+	}
+	if out.ID == "" {
+		return "", false, fmt.Errorf("docker inspect image %s for %s/%s: the answer has no Id", ref, sv.Os, sv.Arch)
+	}
+	return out.ID, true, nil
+}
+
 // NetworkConnect connects a container to a network. endpoint is the
 // EndpointSettings JSON, passed on unchanged, or nil for none.
 func (c *Client) NetworkConnect(ctx context.Context, network, container string, endpoint json.RawMessage) error {

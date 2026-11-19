@@ -33,7 +33,11 @@ type fakeEngine struct {
 	pulled     bool
 	named      string // image ID the reference names before the pull
 	oldGone    bool   // the old image is no longer on the host
-	oldRef     string // replaces the old container's image reference
+	oldTags    []string
+	// platformIDs gives the platform image ID for an image ID; nil answers
+	// like a daemon older than API 1.49.
+	platformIDs map[string]string
+	oldRef      string // replaces the old container's image reference
 
 	checked registry.Target // what the registry check was asked
 	check   registry.Result // what it answers
@@ -57,6 +61,8 @@ type fakeEngine struct {
 	fail map[string]error
 	// tamper edits the new container's inspect document.
 	tamper func(ct map[string]any)
+	// tamperOld edits the old container's inspect document.
+	tamperOld func(ct map[string]any)
 	// onWatch runs at each inspect of the started new container.
 	onWatch func(n int)
 }
@@ -142,6 +148,9 @@ func (f *fakeEngine) ContainerInspect(ctx context.Context, id string) (docker.Co
 		if f.oldRef != "" {
 			ct["Config"].(map[string]any)["Image"] = f.oldRef
 		}
+		if f.tamperOld != nil {
+			f.tamperOld(ct)
+		}
 		return toContainer(f.t, ct), nil
 	case "new":
 		cfg := map[string]any{}
@@ -196,7 +205,7 @@ func (f *fakeEngine) ImageInspect(ctx context.Context, ref string) (docker.Image
 		if f.oldGone {
 			return docker.Image{}, notFound(ref)
 		}
-		return docker.Image{ID: oldImage, RepoDigests: []string{"reg.example/team/web@sha256:old"}, Raw: []byte(oldImageDoc)}, nil
+		return docker.Image{ID: oldImage, RepoTags: f.oldTags, RepoDigests: []string{"reg.example/team/web@sha256:old"}, Raw: []byte(oldImageDoc)}, nil
 	}
 	return docker.Image{}, notFound(ref)
 }
@@ -293,6 +302,17 @@ func (f *fakeEngine) ContainerRemove(ctx context.Context, id string, force bool)
 
 func (f *fakeEngine) ImageRemove(ctx context.Context, id string) error {
 	return f.record("remove image %s", id)
+}
+
+func (f *fakeEngine) ImagePlatformID(ctx context.Context, ref string) (string, bool, error) {
+	if f.platformIDs == nil {
+		return "", false, nil
+	}
+	id, ok := f.platformIDs[ref]
+	if !ok {
+		return "", false, notFound(ref)
+	}
+	return id, true, nil
 }
 
 var fast = Options{Watch: 40 * time.Millisecond, Poll: 5 * time.Millisecond,
@@ -592,6 +612,66 @@ func TestRunKeepsAnImageInUse(t *testing.T) {
 	f.fail["remove image "+oldImage] = &docker.Error{Status: http.StatusConflict, Message: "image is being used"}
 	r := run(context.Background(), f, "apps-web-1", f.opts())
 	if r.Outcome != Updated || r.OldImageRemoved || r.Note != "" {
+		t.Fatalf("result %+v", r)
+	}
+}
+
+func TestRunKeepsAnOldImageThatIsStillNamed(t *testing.T) {
+	f := newFake(t)
+	f.oldTags = []string{"reg.example/team/web:old"}
+	r := run(context.Background(), f, "apps-web-1", f.opts())
+	if r.Outcome != Updated || r.OldImageRemoved || !strings.Contains(r.Note, "still named reg.example/team/web:old") {
+		t.Fatalf("result %+v", r)
+	}
+	if slices.Contains(f.calls, "remove image "+oldImage) {
+		t.Errorf("the named image was removed: %v", f.calls)
+	}
+}
+
+// labelled gives the old container a compose image label.
+func labelled(f *fakeEngine, label string) {
+	f.tamperOld = func(ct map[string]any) {
+		object(ct["Config"])["Labels"].(map[string]any)[composeImageLabel] = label
+	}
+}
+
+func TestRunSetsTheComposeLabelOnTheContainerdStore(t *testing.T) {
+	f := newFake(t)
+	f.platformIDs = map[string]string{oldImage: "sha256:oldplatform", newImage: "sha256:newplatform"}
+	labelled(f, "sha256:oldplatform")
+	r := run(context.Background(), f, "apps-web-1", f.opts())
+	if r.Outcome != Updated || r.Note != "" {
+		t.Fatalf("result %+v", r)
+	}
+	if got := object(f.body["Labels"])[composeImageLabel]; got != "sha256:newplatform" {
+		t.Errorf("compose label = %v, want the new platform image", got)
+	}
+}
+
+func TestRunNotesAComposeLabelItCannotMatch(t *testing.T) {
+	for name, platformIDs := range map[string]map[string]string{
+		"API older than 1.49":    nil,
+		"another platform image": {oldImage: "sha256:other", newImage: "sha256:newplatform"},
+	} {
+		f := newFake(t)
+		f.platformIDs = platformIDs
+		labelled(f, "sha256:oldplatform")
+		r := run(context.Background(), f, "apps-web-1", f.opts())
+		if r.Outcome != Updated || !strings.Contains(r.Note, "may recreate the container") {
+			t.Errorf("%s: result %+v", name, r)
+		}
+		if got := object(f.body["Labels"])[composeImageLabel]; got != "sha256:oldplatform" {
+			t.Errorf("%s: compose label = %v, want it left", name, got)
+		}
+	}
+}
+
+func TestRunDropsTheLabelNoteWhenItRollsBack(t *testing.T) {
+	f := newFake(t)
+	labelled(f, "sha256:oldplatform")
+	f.fail["start new"] = errors.New("boom")
+	r := run(context.Background(), f, "apps-web-1", f.opts())
+	if r.Outcome != RolledBack || strings.Contains(r.Note, "compose label") {
 		t.Fatalf("result %+v", r)
 	}
 }
