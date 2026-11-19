@@ -168,7 +168,7 @@ func newRunner(t *testing.T, hosts map[string]*fakeHost) *Runner {
 	st.Update(func(s *store.State) error {
 		for _, n := range []string{"a", "b"} {
 			if hosts[n] != nil {
-				s.Agents = append(s.Agents, store.Agent{Name: n, URL: "http://" + n + ":7341", Token: "t"})
+				s.Agents = append(s.Agents, store.Agent{Name: n, URL: "http://" + n + ":7778", Token: "t"})
 			}
 		}
 		return nil
@@ -642,7 +642,7 @@ func TestARunChangesNoFailureOfAHostAddedSince(t *testing.T) {
 	r := newRunner(t, map[string]*fakeHost{"a": a})
 	a.onStart = func(string) {
 		r.Store.Update(func(s *store.State) error {
-			s.Agents[0] = store.Agent{Name: "a", URL: "http://other:7341", Token: "t2", Added: time.Now().Add(time.Second)}
+			s.Agents[0] = store.Agent{Name: "a", URL: "http://other:7778", Token: "t2", Added: time.Now().Add(time.Second)}
 			return nil
 		})
 	}

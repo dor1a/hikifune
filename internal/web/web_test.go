@@ -59,7 +59,7 @@ func fixture(t *testing.T) *store.JSON {
 		t.Fatal(err)
 	}
 	st.Update(func(s *store.State) error {
-		s.Agents = []store.Agent{{Name: "a", URL: "http://a:7341", Token: "t"}, {Name: "b", URL: "http://b:7341", Token: "t", CheckOnly: true}}
+		s.Agents = []store.Agent{{Name: "a", URL: "http://a:7778", Token: "t"}, {Name: "b", URL: "http://b:7778", Token: "t", CheckOnly: true}}
 		s.Runs = []store.Run{
 			{ID: "r1", Kind: "check", Started: t0, Finished: t0.Add(time.Minute), Hosts: []store.HostRun{
 				{Agent: "a", AgentVersion: "v1", Docker: "29.1.0", Containers: []store.Entry{
@@ -181,7 +181,7 @@ func TestEmptyStates(t *testing.T) {
 		t.Error("no agents: no hint")
 	}
 	st.Update(func(s *store.State) error {
-		s.Agents = []store.Agent{{Name: "a", URL: "http://a:7341"}}
+		s.Agents = []store.Agent{{Name: "a", URL: "http://a:7778"}}
 		return nil
 	})
 	if _, body := do(t, s.Handler(), "GET", "/", nil); !strings.Contains(body, "No check has run yet") {

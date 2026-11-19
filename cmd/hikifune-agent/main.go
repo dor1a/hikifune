@@ -41,7 +41,7 @@ import (
 	"github.com/dor1a/hikifune/internal/update"
 )
 
-const defaultListen = ":7341"
+const defaultListen = ":7778"
 
 func main() {
 	cmd := "serve"

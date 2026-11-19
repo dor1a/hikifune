@@ -41,7 +41,7 @@ import (
 )
 
 const (
-	defaultListen = ":7340"
+	defaultListen = ":7777"
 	defaultData   = "/data"
 )
 

@@ -20,7 +20,7 @@ func TestJSONRoundTrip(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC)
 	err = s.Update(func(st *State) error {
-		st.Agents = append(st.Agents, Agent{Name: "atsui", URL: "http://atsui:7341", Token: "t", Added: at})
+		st.Agents = append(st.Agents, Agent{Name: "atsui", URL: "http://atsui:7778", Token: "t", Added: at})
 		for i := range 5 {
 			st.Runs = append(st.Runs, Run{ID: string(rune('a' + i)), Kind: "check", Started: at})
 		}

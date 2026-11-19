@@ -204,7 +204,7 @@ Done when: every case passes on both Docker versions, and a real GPU container k
 - `internal/protocol` and the version handshake (R16). The server dials each agent with its token (R26).
 - Agent endpoints: version, inventory, check, update one container, prune.
 - Server: agent list, scheduler with time zone, run records (R31), the skip list for failed digests (R15), dependency order (R29), state storage in JSON (R27).
-- `hikifune-agent` with no command serves the API on `HIKIFUNE_AGENT_LISTEN` (`:7341`) and needs `HIKIFUNE_AGENT_TOKEN`. `hikifune agent add <name> <url>` makes the token and prints it once (a name is up to 63 letters, digits, dots, underscores and hyphens, as it goes into the web UI's paths); `hikifune run check|update` runs once now.
+- `hikifune-agent` with no command serves the API on `HIKIFUNE_AGENT_LISTEN` (`:7778`) and needs `HIKIFUNE_AGENT_TOKEN`. `hikifune agent add <name> <url>` makes the token and prints it once (a name is up to 63 letters, digits, dots, underscores and hyphens, as it goes into the web UI's paths); `hikifune run check|update` runs once now.
 - Registries in `HIKIFUNE_INSECURE_REGISTRIES` are asked over plain HTTP, like Docker's insecure-registries, and never get credentials, neither in the check nor in the pull.
 - `hikifune-agent update` is a command for trying an update by hand. It runs outside the agent's one-job-at-a-time rule, so it is not meant for a host while a run is going.
 - After an update run, a host where something was updated prunes its dangling images, and the run record keeps the space reclaimed for the notification (M6).
