@@ -159,8 +159,10 @@ func (d *Discord) Post(ctx context.Context, e embed) error {
 		case resp.StatusCode >= 300 && resp.StatusCode < 400:
 			return fmt.Errorf("Discord answered %s; a webhook does not redirect, so the URL is not a Discord webhook", status)
 		default:
-			if m := discordMessage(msg); m != "" {
-				return errors.New(d.scrub(fmt.Sprintf("Discord answered %s: %s", status, m)))
+			// The token goes before the message is cut short, so a cut
+			// through the token leaves none of it.
+			if m := clip(d.scrub(discordMessage(msg)), 200); m != "" {
+				return fmt.Errorf("Discord answered %s: %s", status, m)
 			}
 			return fmt.Errorf("Discord answered %s", status)
 		}
@@ -193,11 +195,15 @@ func discordMessage(body []byte) string {
 	if json.Unmarshal(body, &b) != nil {
 		return ""
 	}
-	m := strings.TrimSpace(b.Message)
-	if len(m) > 200 {
-		m = m[:200]
+	return strings.TrimSpace(b.Message)
+}
+
+// clip cuts s to at most n runes.
+func clip(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
 	}
-	return m
+	return s
 }
 
 // scrub takes the webhook URL and its token out of a message.

@@ -282,6 +282,17 @@ func TestPostErrorsHideTheToken(t *testing.T) {
 		t.Errorf("echoing 404: %v", err)
 	}
 
+	// A message cut short through the token keeps none of it.
+	cut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"message": "`+strings.Repeat("x", 190)+`secret-token"}`) // the token crosses byte 200
+	}))
+	defer cut.Close()
+	err = (&Discord{URL: cut.URL + "/api/webhooks/1/secret-token"}).Post(context.Background(), embed{Title: "a"})
+	if err == nil || strings.Contains(err.Error(), "secr") {
+		t.Errorf("cut message: %v", err)
+	}
+
 	// A redirect is not followed, so no other server gets the URL.
 	var leaked string
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
