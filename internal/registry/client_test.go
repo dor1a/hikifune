@@ -382,3 +382,22 @@ func TestAMissingTagKeepsTheToken(t *testing.T) {
 		t.Errorf("%d token requests for two missing tags, want 1", tokens)
 	}
 }
+
+// A redirect whose Location does not parse never shows it in the error: it
+// may carry a token in its query.
+func TestUnparsedRedirectStaysOutOfErrors(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://[elsewhere/v2/x?token=s3cret")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	c := New(nil, srv.Client())
+	ref, err := ParseReference(strings.TrimPrefix(srv.URL, "https://") + "/team/app:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Digest(context.Background(), ref)
+	if err == nil || strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "elsewhere") {
+		t.Fatalf("err = %v", err)
+	}
+}

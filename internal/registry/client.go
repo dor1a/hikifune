@@ -91,6 +91,11 @@ func cleanErr(err error) error {
 	if u, perr := url.Parse(ue.URL); perr == nil {
 		where = u.Scheme + "://" + u.Host
 	}
+	// Go quotes a Location it cannot parse in the inner error, query and
+	// all, so that error is replaced.
+	if strings.Contains(ue.Err.Error(), "failed to parse Location header") {
+		return fmt.Errorf("%s %s: the redirect's Location does not parse", ue.Op, where)
+	}
 	return fmt.Errorf("%s %s: %w", ue.Op, where, ue.Err)
 }
 
