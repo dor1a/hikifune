@@ -42,6 +42,9 @@ type Runner struct {
 	Watch time.Duration
 	// Poll is how often a running job is asked for.
 	Poll time.Duration
+	// Notify, when set, gets each run of Run and RunIf once it is recorded
+	// and the next run may start (R17). Runs started by hand are not given.
+	Notify func(ctx context.Context, run store.Run)
 
 	dial func(store.Agent) (agentAPI, error)
 	now  func() time.Time
@@ -162,11 +165,16 @@ func (r *Runner) RunIf(ctx context.Context, kind string, still func() bool) (run
 		return store.Run{}, false, err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if still != nil && !still() {
+		r.mu.Unlock()
 		return store.Run{}, false, nil
 	}
 	run, err = r.run(ctx, spec)
+	r.mu.Unlock()
+	// Sent with the lock released, so a slow webhook holds back no run.
+	if err == nil && r.Notify != nil {
+		r.Notify(ctx, run)
+	}
 	return run, true, err
 }
 

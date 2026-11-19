@@ -804,15 +804,15 @@ func TestStartWhileBusy(t *testing.T) {
 func TestScheduleFollowsTheSettings(t *testing.T) {
 	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
 	s := &Schedule{Runner: r, CheckAt: Clock{0, 0}, UpdateAt: Clock{1, 0}, Location: time.UTC, Wake: make(chan struct{}, 1)}
-	if c, u := s.Clocks(); c != (Clock{0, 0}) || u != (Clock{1, 0}) {
-		t.Fatalf("env clocks %v %v", c, u)
+	if c, u := s.Times(); c != (When{At: Clock{0, 0}}) || u != (When{At: Clock{1, 0}}) {
+		t.Fatalf("env times %v %v", c, u)
 	}
 	r.Store.Update(func(st *store.State) error {
-		st.Settings = store.Settings{Saved: true, CheckAt: "02:30", UpdateAt: "03:15"}
+		st.Settings = store.Settings{Saved: true, CheckAt: "02:30", UpdateAt: "03:15", UpdateEvery: "sun"}
 		return nil
 	})
-	if c, u := s.Clocks(); c != (Clock{2, 30}) || u != (Clock{3, 15}) {
-		t.Fatalf("saved clocks %v %v", c, u)
+	if c, u := s.Times(); c != (When{At: Clock{2, 30}}) || u != (When{Every: Every{Weekly: true, Weekday: time.Sunday}, At: Clock{3, 15}}) {
+		t.Fatalf("saved times %v %v", c, u)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -836,5 +836,154 @@ func TestScheduleFollowsTheSettings(t *testing.T) {
 	}
 	if st, _ := r.Store.Read(); len(st.Runs) != 0 {
 		t.Fatalf("a wake started a run: %+v", st.Runs)
+	}
+}
+
+func TestEvery(t *testing.T) {
+	for in, want := range map[string]string{"": "day", "day": "day", "SUN": "sun", "Wednesday": "wed", "1": "1", "30": "30", "31": "last", "last": "last", "Last Day": "last"} {
+		e, err := ParseEvery(in)
+		if err != nil || e.String() != want {
+			t.Errorf("ParseEvery(%q) = %v, %v; want %s", in, e, err, want)
+		}
+	}
+	for _, bad := range []string{"0", "32", "weekly", "-1"} {
+		if _, err := ParseEvery(bad); err == nil {
+			t.Errorf("ParseEvery(%q) took it", bad)
+		}
+	}
+	seoul, _ := time.LoadLocation("Asia/Seoul")
+	at := func(s string) time.Time {
+		v, err := time.ParseInLocation("2006-01-02 15:04", s, seoul)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for _, tt := range []struct {
+		every, now, want string
+	}{
+		// 2026-11-19 is a Thursday.
+		{"day", "2026-11-19 12:00", "2026-11-20 01:00"},
+		{"sun", "2026-11-19 12:00", "2026-11-22 01:00"},
+		{"thu", "2026-11-19 00:30", "2026-11-19 01:00"},
+		{"thu", "2026-11-19 01:00", "2026-11-26 01:00"},
+		{"15", "2026-11-19 12:00", "2026-12-15 01:00"},
+		// A shorter month runs on its last day.
+		{"last", "2026-11-19 12:00", "2026-11-30 01:00"},
+		{"last", "2026-11-30 02:00", "2026-12-31 01:00"},
+		{"last", "2027-02-01 00:00", "2027-02-28 01:00"},
+		{"30", "2027-02-01 00:00", "2027-02-28 01:00"},
+		{"29", "2028-02-01 00:00", "2028-02-29 01:00"},
+	} {
+		e, _ := ParseEvery(tt.every)
+		if got := (When{Every: e, At: Clock{1, 0}}).Next(at(tt.now), seoul); !got.Equal(at(tt.want)) {
+			t.Errorf("%s from %s: %s, want %s", tt.every, tt.now, got.In(seoul).Format("2006-01-02 15:04"), tt.want)
+		}
+	}
+	if w := (When{Every: Every{Day: LastDay}, At: Clock{1, 0}}).Words(); w != "on the last day of every month at 01:00" {
+		t.Errorf("words %q", w)
+	}
+}
+
+// Scheduled runs and runs from the CLI are notified; runs by hand are not.
+func TestNotify(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	var got []store.Run
+	r.Notify = func(_ context.Context, run store.Run) {
+		got = append(got, run)
+		// The lock is released by now: a slow webhook holds back no run.
+		if err := r.Start(context.Background(), Spec{Kind: KindCheck, Manual: "bob"}, nil); err != nil {
+			t.Errorf("start during the notification: %v", err)
+		}
+		for r.Active() != nil {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if _, err := r.Run(context.Background(), KindCheck); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	if err := r.Start(context.Background(), Spec{Kind: KindCheck, Manual: "alice"}, func(store.Run, error) { close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if len(got) != 1 || got[0].Manual != "" || got[0].Kind != KindCheck {
+		t.Fatalf("notified %+v", got)
+	}
+}
+
+// A schedule saved during a run counts from when it was saved: an update
+// time still ahead then runs, though the loop saw the change only after a
+// slow notification.
+func TestScheduleCountsAChangeFromWhenItWasSaved(t *testing.T) {
+	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
+	r.Store.Update(func(st *store.State) error {
+		st.Settings = store.Settings{Saved: true, CheckAt: "01:00", UpdateAt: "02:00"}
+		return nil
+	})
+	s := &Schedule{Runner: r, Location: time.UTC, Wake: make(chan struct{}, 1)}
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 19, 0, 59, 0, 0, time.UTC)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	var once sync.Once
+	r.Notify = func(_ context.Context, run store.Run) {
+		once.Do(func() {
+			r.Store.Update(func(st *store.State) error {
+				st.Settings.UpdateAt = "01:01"
+				st.Settings.SavedAt = time.Date(2026, 11, 19, 1, 0, 5, 0, time.UTC)
+				return nil
+			})
+			s.Wake <- struct{}{}
+			mu.Lock()
+			now = time.Date(2026, 11, 19, 1, 1, 35, 0, time.UTC)
+			mu.Unlock()
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := true
+	s.now = clock
+	s.sleep = func(ctx context.Context, d time.Duration) error {
+		switch {
+		case d <= 0:
+			return nil
+		case first:
+			first = false
+			mu.Lock()
+			now = now.Add(d)
+			mu.Unlock()
+			return nil
+		}
+		cancel()
+		return context.Canceled
+	}
+	s.Loop(ctx)
+	st, _ := r.Store.Read()
+	var kinds []string
+	for _, run := range st.Runs {
+		kinds = append(kinds, run.Kind)
+	}
+	if strings.Join(kinds, " ") != "check update" {
+		t.Fatalf("runs %v", kinds)
+	}
+}
+
+// A schedule saved in the web UI replaces the environment's whole: an
+// empty period in it is every day.
+func TestASavedScheduleWithoutAPeriodIsDaily(t *testing.T) {
+	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
+	s := &Schedule{Runner: r, UpdateEvery: Every{Weekly: true, Weekday: time.Sunday}, Location: time.UTC}
+	r.Store.Update(func(st *store.State) error {
+		st.Settings = store.Settings{Saved: true, CheckAt: "00:00", UpdateAt: "01:00"}
+		return nil
+	})
+	if _, u := s.Times(); u.Every != (Every{}) {
+		t.Fatalf("update every %v", u.Every)
 	}
 }

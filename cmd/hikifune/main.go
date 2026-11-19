@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/dor1a/hikifune/internal/auth"
 	"github.com/dor1a/hikifune/internal/buildinfo"
+	"github.com/dor1a/hikifune/internal/notify"
 	"github.com/dor1a/hikifune/internal/protocol"
 	"github.com/dor1a/hikifune/internal/server"
 	"github.com/dor1a/hikifune/internal/store"
@@ -103,7 +105,48 @@ func runner() (*server.Runner, error) {
 	if err != nil || watch <= 0 {
 		return nil, fmt.Errorf("HIKIFUNE_WATCH=%q is not a duration such as 2m", os.Getenv("HIKIFUNE_WATCH"))
 	}
-	return &server.Runner{Store: st, Version: buildinfo.Version, Watch: watch}, nil
+	r := &server.Runner{Store: st, Version: buildinfo.Version, Watch: watch}
+	n, err := notifier(st)
+	if err != nil {
+		return nil, err
+	}
+	if n != nil {
+		r.Notify = func(ctx context.Context, run store.Run) {
+			if err := n.Run(ctx, run); err != nil {
+				slog.Error("notification failed", "run", run.ID, "err", err)
+			}
+		}
+	}
+	return r, nil
+}
+
+// notifier reads the Discord settings; no webhook URL means no
+// notifications.
+func notifier(st store.Store) (*notify.Notifier, error) {
+	hook := os.Getenv("HIKIFUNE_DISCORD_WEBHOOK_URL")
+	if hook == "" {
+		return nil, nil
+	}
+	if err := notify.CheckWebhook(hook); err != nil {
+		return nil, fmt.Errorf("HIKIFUNE_DISCORD_WEBHOOK_URL: %w", err)
+	}
+	avatar := os.Getenv("HIKIFUNE_DISCORD_AVATAR_URL")
+	if avatar != "" {
+		if u, err := url.Parse(avatar); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return nil, fmt.Errorf("HIKIFUNE_DISCORD_AVATAR_URL=%q is not an http or https URL", avatar)
+		}
+	}
+	return &notify.Notifier{
+		Discord: &notify.Discord{URL: hook, Avatar: avatar},
+		Template: func() string {
+			s, err := st.Read()
+			if err != nil {
+				return ""
+			}
+			return s.Settings.Template
+		},
+		Log: slog.Default(),
+	}, nil
 }
 
 func serve() error {
@@ -125,6 +168,18 @@ func serve() error {
 	if err != nil {
 		return fmt.Errorf("HIKIFUNE_UPDATE_AT: %w", err)
 	}
+	checkEvery, err := server.ParseEvery(env("HIKIFUNE_CHECK_EVERY", "day"))
+	if err != nil {
+		return fmt.Errorf("HIKIFUNE_CHECK_EVERY: %w", err)
+	}
+	updateEvery, err := server.ParseEvery(env("HIKIFUNE_UPDATE_EVERY", "day"))
+	if err != nil {
+		return fmt.Errorf("HIKIFUNE_UPDATE_EVERY: %w", err)
+	}
+	n, err := notifier(r.Store)
+	if err != nil {
+		return err
+	}
 	authSettings, err := loadAuth(env)
 	if err != nil {
 		return err
@@ -132,9 +187,12 @@ func serve() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	sched := &server.Schedule{Runner: r, CheckAt: checkAt, UpdateAt: updateAt, Location: loc, Wake: make(chan struct{}, 1)}
+	sched := &server.Schedule{Runner: r, CheckAt: checkAt, UpdateAt: updateAt, CheckEvery: checkEvery, UpdateEvery: updateEvery,
+		Location: loc, Wake: make(chan struct{}, 1)}
 	cfg := web.Config{Store: r.Store, Runner: r, Schedule: sched, Wake: sched.Wake, Location: loc,
-		DefaultCheck: checkAt, DefaultUpdate: updateAt, Watch: r.Watch, Version: buildinfo.Version,
+		DefaultCheck:  server.When{Every: checkEvery, At: checkAt},
+		DefaultUpdate: server.When{Every: updateEvery, At: updateAt},
+		Watch:         r.Watch, Version: buildinfo.Version, Notifier: n,
 		Base: ctx, Log: slog.Default(),
 		Status: func(ctx context.Context, a store.Agent) (protocol.Version, error) {
 			c, err := server.NewClient(a.URL, a.Token)

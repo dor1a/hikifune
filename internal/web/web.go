@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dor1a/hikifune/internal/auth"
+	"github.com/dor1a/hikifune/internal/notify"
 	"github.com/dor1a/hikifune/internal/protocol"
 	"github.com/dor1a/hikifune/internal/registry"
 	"github.com/dor1a/hikifune/internal/server"
@@ -40,9 +41,9 @@ type Runner interface {
 	Active() *server.Activity
 }
 
-// Schedule gives the check and update times in force.
+// Schedule gives the check and update schedules in force.
 type Schedule interface {
-	Clocks() (check, update server.Clock)
+	Times() (check, update server.When)
 }
 
 // Config is what the pages need.
@@ -54,8 +55,8 @@ type Config struct {
 	Wake chan<- struct{}
 	// Location is the time zone of the schedule and of every time shown.
 	Location *time.Location
-	// DefaultCheck and DefaultUpdate are the times from the environment.
-	DefaultCheck, DefaultUpdate server.Clock
+	// DefaultCheck and DefaultUpdate are the schedules from the environment.
+	DefaultCheck, DefaultUpdate server.When
 	Watch                       time.Duration
 	// Auth puts the pages behind sign-in; nil leaves access to a proxy (R33).
 	Auth    *auth.Auth
@@ -64,6 +65,9 @@ type Config struct {
 	Base context.Context
 	// Status asks one agent for its version, for the hosts page.
 	Status func(ctx context.Context, a store.Agent) (protocol.Version, error)
+	// Notifier sends Send test messages and shows which webhook is used;
+	// nil when no webhook URL is set (R17).
+	Notifier *notify.Notifier
 	// KeepRuns is how many runs the history shows; the store may keep
 	// older ones for the container lists. 0 shows every run.
 	KeepRuns int
@@ -101,6 +105,9 @@ func New(cfg Config) (*Server, error) {
 		"words":  func(s string) string { return strings.ReplaceAll(s, "_", " ") },
 		"bytes":  humanBytes,
 		"rows":   func(rows []row, host bool) rowTable { return rowTable{Rows: rows, Host: host} },
+		"when": func(label, name string, f whenForm) whenRow {
+			return whenRow{Label: label, Name: name, Form: f, Weekdays: weekdays}
+		},
 		// A host name as one path segment, for a name from before the
 		// naming rule.
 		"seg": url.PathEscape,
@@ -135,6 +142,8 @@ func (s *Server) Handler() http.Handler {
 	app.HandleFunc("GET /runs/{id}", s.run)
 	app.HandleFunc("GET /settings", s.settings)
 	app.HandleFunc("POST /settings", s.saveSettings)
+	app.HandleFunc("POST /settings/template", s.saveTemplate)
+	app.HandleFunc("POST /settings/template/test", s.testTemplate)
 	app.HandleFunc("GET /activity", s.activity)
 	app.HandleFunc("POST /actions/check", s.checkNow)
 	app.HandleFunc("POST /actions/update", s.updateNow)
@@ -603,7 +612,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 // --- Settings ---
 
 type settingsData struct {
-	CheckAt, UpdateAt           string
+	Check, Update               whenForm
 	DefaultCheck, DefaultUpdate string
 	Saved                       bool
 	Location                    string
@@ -611,17 +620,30 @@ type settingsData struct {
 	NextCheck, NextUpdate       time.Time
 	Error                       string
 	Done                        bool
+	// Notifications: the webhook without its token, the template in the
+	// editor and whether it is the default.
+	Webhook         string
+	Avatar          bool
+	Template        string
+	DefaultTemplate bool
+	TemplateError   string
+	TemplateDone    bool
 }
 
 func (s *Server) settingsData(st store.State) settingsData {
-	check, upd := s.cfg.Schedule.Clocks()
+	check, upd := s.cfg.Schedule.Times()
 	now := s.now()
-	return settingsData{
-		CheckAt: check.String(), UpdateAt: upd.String(),
-		DefaultCheck: s.cfg.DefaultCheck.String(), DefaultUpdate: s.cfg.DefaultUpdate.String(),
+	d := settingsData{
+		Check: formOf(check), Update: formOf(upd),
+		DefaultCheck: s.cfg.DefaultCheck.Words(), DefaultUpdate: s.cfg.DefaultUpdate.Words(),
 		Saved: st.Settings.Saved, Location: s.cfg.Location.String(), Watch: s.cfg.Watch,
-		NextCheck: server.Next(now, check, s.cfg.Location), NextUpdate: server.Next(now, upd, s.cfg.Location),
+		NextCheck: check.Next(now, s.cfg.Location), NextUpdate: upd.Next(now, s.cfg.Location),
+		Template: cmp.Or(st.Settings.Template, notify.Default), DefaultTemplate: st.Settings.Template == "",
 	}
+	if n := s.cfg.Notifier; n != nil && n.Discord != nil {
+		d.Webhook, d.Avatar = notify.Redact(n.Discord.URL), n.Discord.Avatar != ""
+	}
+	return d
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -631,27 +653,102 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	d := s.settingsData(st)
 	d.Done = r.URL.Query().Get("saved") == "1"
+	d.TemplateDone = r.URL.Query().Get("saved") == "template"
 	s.render(w, http.StatusOK, "settings", s.newPage(r, st, "settings", "Settings", d))
+}
+
+// whenForm is one schedule as the settings form shows it: a period, the
+// field that period needs, and the time of day.
+type whenForm struct {
+	Period  string // day, week or month
+	Weekday string // sun to sat, for every week
+	Day     string // 1 to 30 or "last day", for every month
+	At      string
+}
+
+type weekday struct{ Value, Name string }
+
+var weekdays = func() []weekday {
+	var out []weekday
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		out = append(out, weekday{server.Every{Weekly: true, Weekday: d}.String(), d.String()})
+	}
+	return out
+}()
+
+// whenRow is what the schedule row template gets.
+type whenRow struct {
+	Label, Name string
+	Form        whenForm
+	Weekdays    []weekday
+}
+
+func formOf(w server.When) whenForm {
+	f := whenForm{Period: "day", Weekday: "sun", Day: "1", At: w.At.String()}
+	switch {
+	case w.Every.Weekly:
+		f.Period, f.Weekday = "week", w.Every.String()
+	case w.Every.Day == server.LastDay:
+		f.Period, f.Day = "month", "last day"
+	case w.Every.Day > 0:
+		f.Period, f.Day = "month", w.Every.String()
+	}
+	return f
+}
+
+// formFrom keeps what was sent, to show it again with an error.
+func formFrom(r *http.Request, prefix string) whenForm {
+	return whenForm{Period: r.FormValue(prefix + "_period"), Weekday: r.FormValue(prefix + "_weekday"),
+		Day: r.FormValue(prefix + "_day"), At: r.FormValue(prefix + "_at")}
+}
+
+// whenFrom reads one schedule from the form fields prefix_period,
+// prefix_weekday, prefix_day and prefix_at.
+func whenFrom(r *http.Request, prefix string) (server.When, error) {
+	at, err := server.ParseClock(r.FormValue(prefix + "_at"))
+	if err != nil {
+		return server.When{}, err
+	}
+	var every server.Every
+	switch p := r.FormValue(prefix + "_period"); p {
+	case "", "day":
+	case "week":
+		every, err = server.ParseEvery(r.FormValue(prefix + "_weekday"))
+		if err == nil && !every.Weekly {
+			err = fmt.Errorf("%q is not a weekday", r.FormValue(prefix+"_weekday"))
+		}
+	case "month":
+		every, err = server.ParseEvery(r.FormValue(prefix + "_day"))
+		if err == nil && every.Day == 0 {
+			err = fmt.Errorf("%q is not a day of the month from 1 to 30, or last day", r.FormValue(prefix+"_day"))
+		}
+	default:
+		err = fmt.Errorf("%q is not day, week or month", p)
+	}
+	return server.When{Every: every, At: at}, err
 }
 
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	reset := r.FormValue("reset") == "1"
-	check, errC := server.ParseClock(r.FormValue("check_at"))
-	upd, errU := server.ParseClock(r.FormValue("update_at"))
+	check, errC := whenFrom(r, "check")
+	upd, errU := whenFrom(r, "update")
 	if !reset && (errC != nil || errU != nil) {
 		st, _ := s.cfg.Store.Read()
 		d := s.settingsData(st)
-		d.CheckAt, d.UpdateAt = r.FormValue("check_at"), r.FormValue("update_at")
+		d.Check, d.Update = formFrom(r, "check"), formFrom(r, "update")
 		d.Error = cmp.Or(errC, errU).Error()
 		s.render(w, http.StatusUnprocessableEntity, "settings", s.newPage(r, st, "settings", "Settings", d))
 		return
 	}
 	err := s.cfg.Store.Update(func(st *store.State) error {
+		set := &st.Settings
+		set.SavedAt = s.now().UTC()
 		if reset {
-			st.Settings = store.Settings{}
+			set.Saved, set.CheckAt, set.UpdateAt, set.CheckEvery, set.UpdateEvery = false, "", "", "", ""
 			return nil
 		}
-		st.Settings = store.Settings{Saved: true, CheckAt: check.String(), UpdateAt: upd.String()}
+		set.Saved, set.CheckAt, set.UpdateAt = true, check.At.String(), upd.At.String()
+		set.CheckEvery, set.UpdateEvery = check.Every.String(), upd.Every.String()
 		return nil
 	})
 	if err != nil {
@@ -665,6 +762,57 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
+}
+
+// saveTemplate keeps the notification template once it parses and renders
+// a message with every list filled (R19). The default is kept as empty, so
+// a newer default reaches those who never changed it.
+func (s *Server) saveTemplate(w http.ResponseWriter, r *http.Request) {
+	text := strings.ReplaceAll(r.FormValue("template"), "\r\n", "\n")
+	if r.FormValue("reset") == "1" || strings.TrimSpace(text) == strings.TrimSpace(notify.Default) {
+		text = ""
+	}
+	if _, err := notify.Parse(text); err != nil {
+		st, _ := s.cfg.Store.Read()
+		d := s.settingsData(st)
+		d.Template, d.DefaultTemplate, d.TemplateError = text, false, err.Error()
+		s.render(w, http.StatusUnprocessableEntity, "settings", s.newPage(r, st, "settings", "Settings", d))
+		return
+	}
+	err := s.cfg.Store.Update(func(st *store.State) error {
+		st.Settings.Template = text
+		return nil
+	})
+	if err != nil {
+		http.Error(w, "the template could not be saved: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=template", http.StatusSeeOther)
+}
+
+// testTemplate sends the sample message with the template in the editor,
+// saved or not (P10).
+func (s *Server) testTemplate(w http.ResponseWriter, r *http.Request) {
+	res := testResult{}
+	switch t, err := notify.Parse(strings.ReplaceAll(r.FormValue("template"), "\r\n", "\n")); {
+	case s.cfg.Notifier == nil || s.cfg.Notifier.Discord == nil:
+		res.Error = "No webhook is set. Set HIKIFUNE_DISCORD_WEBHOOK_URL and restart the server."
+	case err != nil:
+		res.Error = "The template does not work: " + err.Error()
+	default:
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		if err := s.cfg.Notifier.Send(ctx, t, notify.Sample()); err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Notice = "Sent a sample message for example-host."
+		}
+	}
+	s.render(w, http.StatusOK, "testresult", page{Data: res})
+}
+
+type testResult struct {
+	Notice, Error string
 }
 
 // --- Activity and actions ---

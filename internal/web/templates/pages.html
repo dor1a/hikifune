@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="{{asset "style.css"}}">
 <script src="{{asset "mode.js"}}"></script>
 <script src="{{asset "htmx.min.js"}}" defer></script>
+<script src="{{asset "schedule.js"}}" defer></script>
 </head>
 <body>
 {{if eq .Page "notice"}}
@@ -271,6 +272,26 @@
 {{template "bottom" .}}
 {{- end}}
 
+{{define "when" -}}
+<div class="when">
+  <span class="label">{{.Label}}</span>
+  <select name="{{.Name}}_period" data-period aria-label="{{.Label}}: how often">
+    <option value="day"{{if eq .Form.Period "day"}} selected{{end}}>every day</option>
+    <option value="week"{{if eq .Form.Period "week"}} selected{{end}}>every week</option>
+    <option value="month"{{if eq .Form.Period "month"}} selected{{end}}>every month</option>
+  </select>
+  <span class="when-field" data-for="week"{{if ne .Form.Period "week"}} hidden{{end}}><span class="muted">on</span>
+    <select name="{{.Name}}_weekday" aria-label="{{.Label}}: weekday">
+      {{range .Weekdays}}<option value="{{.Value}}"{{if eq .Value $.Form.Weekday}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select></span>
+  <span class="when-field" data-for="month"{{if ne .Form.Period "month"}} hidden{{end}}><span class="muted">on</span>
+    <span class="day-field"><input type="text" name="{{.Name}}_day" value="{{.Form.Day}}" inputmode="numeric" autocomplete="off" data-day
+      aria-label="{{.Label}}: day of the month, 1 to 30 or last day"><span class="spin"><button type="button" data-step="1" tabindex="-1" aria-label="Later day">▲</button><button type="button" data-step="-1" tabindex="-1" aria-label="Earlier day">▼</button></span></span></span>
+  <span class="muted">at</span>
+  <input type="time" name="{{.Name}}_at" value="{{.Form.At}}" required aria-label="{{.Label}}: time">
+</div>
+{{- end}}
+
 {{define "settings" -}}
 {{template "top" .}}
 <h1 class="title">Settings</h1>
@@ -279,17 +300,41 @@
 {{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
 <form class="card settings" method="post" action="/settings">
   <h2>Schedule</h2>
-  <p class="muted">Every day, in {{.Location}}. {{if .Saved}}Set here.{{else}}From the environment: check {{.DefaultCheck}}, update {{.DefaultUpdate}}.{{end}}</p>
-  <label>Check at <input type="time" name="check_at" value="{{.CheckAt}}" required></label>
-  <label>Update at <input type="time" name="update_at" value="{{.UpdateAt}}" required></label>
+  <p class="muted">In {{.Location}}. {{if .Saved}}Set here.{{else}}From the environment: check {{.DefaultCheck}}, update {{.DefaultUpdate}}.{{end}} On day 29 or 30, a shorter month runs on its last day.</p>
+  {{template "when" (when "Check" "check" .Check)}}
+  {{template "when" (when "Update" "update" .Update)}}
   <p class="muted">Next check {{local .NextCheck}}, next update {{local .NextUpdate}}. Each updated container is watched for {{.Watch}}.</p>
   <div class="buttons">
     <button type="submit" class="primary">Save</button>
-    {{if .Saved}}<button type="submit" name="reset" value="1" class="link" formnovalidate>Use the environment's times</button>{{end}}
+    {{if .Saved}}<button type="submit" name="reset" value="1" class="link" formnovalidate>Use the environment's schedule</button>{{end}}
+  </div>
+</form>
+
+{{if .TemplateDone}}<p class="msg">Saved. The next notification uses this template.</p>{{end}}
+{{with .TemplateError}}<p class="msg bad">The template was not saved: {{.}}</p>{{end}}
+<form class="card settings notify" method="post" action="/settings/template">
+  <h2>Notifications</h2>
+  <dl class="facts">
+    <div><dt>Discord webhook</dt><dd>{{if .Webhook}}<code>{{.Webhook}}</code> <span class="muted">from HIKIFUNE_DISCORD_WEBHOOK_URL, token hidden</span>{{else}}<span class="muted">Not set, so no notifications are sent. Set HIKIFUNE_DISCORD_WEBHOOK_URL and restart the server.</span>{{end}}</dd></div>
+    <div><dt>Avatar</dt><dd class="muted">{{if .Avatar}}from HIKIFUNE_DISCORD_AVATAR_URL{{else}}the one set on the webhook in Discord{{end}}</dd></div>
+    <div><dt>Sent</dt><dd class="muted">after the scheduled runs, one message per host with something to say</dd></div>
+  </dl>
+  <label class="block" for="template">Message template{{if .DefaultTemplate}} <span class="tag">default</span>{{end}}</label>
+  <textarea id="template" name="template" rows="18" spellcheck="false">{{.Template}}</textarea>
+  <p class="muted small">Go text/template for the embed text; the title is the host. Fields: <code>.Host</code>, <code>.Kind</code>, <code>.At</code>, <code>.LeftOut</code>, <code>.Available</code>, <code>.Updated</code>, <code>.RolledBack</code>, <code>.Failed</code> (each item has <code>.Container</code>, <code>.Image</code>, <code>.Reason</code>, <code>.Protected</code>, <code>.Self</code>), <code>.Reclaimed</code>, <code>.Note</code>. <code>md</code> escapes Discord markdown.</p>
+  <div class="buttons">
+    <button type="submit" class="primary">Save</button>
+    <button type="button" hx-post="/settings/template/test" hx-target="#test-result" hx-swap="innerHTML">Send test</button>
+    {{if not .DefaultTemplate}}<button type="submit" name="reset" value="1" class="link">Use the default</button>{{end}}
+    <span id="test-result" role="status"></span>
   </div>
 </form>
 {{end}}
 {{template "bottom" .}}
+{{- end}}
+
+{{define "testresult" -}}
+{{with .Data}}{{with .Notice}}<span class="msg">{{.}}</span>{{end}}{{with .Error}}<span class="msg bad">{{.}}</span>{{end}}{{end}}
 {{- end}}
 
 {{define "notice" -}}

@@ -4,16 +4,21 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dor1a/hikifune/internal/agent"
 	"github.com/dor1a/hikifune/internal/buildinfo"
 	"github.com/dor1a/hikifune/internal/docker"
+	"github.com/dor1a/hikifune/internal/notify"
 	"github.com/dor1a/hikifune/internal/registry"
 	"github.com/dor1a/hikifune/internal/store"
 )
@@ -22,7 +27,9 @@ import (
 // served over HTTP by this process, with the containers that
 // deploy/compose/e2e/server.sh creates. It checks M4's "done when": both
 // hosts checked, one update at a time per host with dependencies first,
-// every result recorded, and a failed digest skipped at the next run.
+// every result recorded, and a failed digest skipped at the next run. A fake
+// Discord webhook checks M6's: one message per host after each run with
+// something to say, every reason in it, and an edited template used.
 func TestE2EServer(t *testing.T) {
 	hosts := strings.Fields(os.Getenv("HIKIFUNE_E2E_HOSTS"))
 	if len(hosts) == 0 {
@@ -55,6 +62,16 @@ func TestE2EServer(t *testing.T) {
 		})
 	}
 	r := &Runner{Store: st, Version: buildinfo.Version, Watch: 5 * time.Second, Poll: 500 * time.Millisecond}
+	hook := &webhook{}
+	hookSrv := httptest.NewServer(hook)
+	defer hookSrv.Close()
+	tpl := ""
+	n := &notify.Notifier{Discord: &notify.Discord{URL: hookSrv.URL + "/api/webhooks/1/e2e"}, Template: func() string { return tpl }}
+	r.Notify = func(ctx context.Context, run store.Run) {
+		if err := n.Run(ctx, run); err != nil {
+			t.Errorf("notify %s run: %v", run.Kind, err)
+		}
+	}
 
 	run, err := r.Run(ctx, KindCheck)
 	if err != nil {
@@ -74,6 +91,13 @@ func TestE2EServer(t *testing.T) {
 		}
 		if !find(t, h, "srv-guard").Protected || !find(t, h, "srv-self").Self {
 			t.Errorf("%s: guard and self not marked", h.Agent)
+		}
+	}
+	for _, e := range hook.take(t, len(hosts)) {
+		for _, want := range []string{"**Available**", "• `srv-db`", "• `srv-guard` registry:5000/", " (protected)", "• `srv-self`", " (hikifune)"} {
+			if !strings.Contains(e.Description, want) {
+				t.Errorf("check message for %s has no %q:\n%s", e.Title, want, e.Description)
+			}
 		}
 	}
 
@@ -115,6 +139,16 @@ func TestE2EServer(t *testing.T) {
 			}
 		}
 	}
+	for _, e := range hook.take(t, len(hosts)) {
+		t.Logf("update message for %s:\n%s", e.Title, e.Description)
+		_, back, _ := strings.Cut(e.Description, "**Rolled back**\n• `srv-bad`")
+		lines := strings.Split(back, "\n")
+		if !strings.Contains(e.Description, "**Updated**") || !strings.Contains(e.Description, "• `srv-db`") ||
+			!strings.Contains(e.Description, "• `srv-web`") || len(lines) < 2 || strings.TrimSpace(lines[1]) == "" ||
+			strings.Contains(e.Description, "srv-guard") || e.Color != 0xC64343 {
+			t.Errorf("update message for %s: color %x\n%s", e.Title, e.Color, e.Description)
+		}
+	}
 	state, _ := st.Read()
 	if len(state.Failed) != len(hosts) {
 		t.Fatalf("failed digests = %+v", state.Failed)
@@ -134,9 +168,58 @@ func TestE2EServer(t *testing.T) {
 			}
 		}
 	}
-	if state, _ := st.Read(); len(state.Runs) != 3 {
+	// Nothing was updated, rolled back or failed: no message.
+	hook.take(t, 0)
+
+	tpl = "edited {{.Kind}} run on {{.Host}}: {{len .Available}} available"
+	if _, err := r.Run(ctx, KindCheck); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range hook.take(t, len(hosts)) {
+		if !strings.HasPrefix(e.Description, "edited check run on "+e.Title+": ") {
+			t.Errorf("edited template not used: %q", e.Description)
+		}
+	}
+	if state, _ := st.Read(); len(state.Runs) != 4 {
 		t.Errorf("%d runs recorded", len(state.Runs))
 	}
+}
+
+// webhook plays a Discord webhook and keeps the embeds it gets.
+type webhook struct {
+	mu     sync.Mutex
+	embeds []sentEmbed
+}
+
+type sentEmbed struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Color       int    `json:"color"`
+}
+
+func (w *webhook) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	var p struct {
+		Embeds []sentEmbed `json:"embeds"`
+	}
+	b, _ := io.ReadAll(r.Body)
+	json.Unmarshal(b, &p)
+	w.mu.Lock()
+	w.embeds = append(w.embeds, p.Embeds...)
+	w.mu.Unlock()
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+// take returns the embeds got since the last take, which must be n.
+func (w *webhook) take(t *testing.T, n int) []sentEmbed {
+	t.Helper()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	got := w.embeds
+	w.embeds = nil
+	if len(got) != n {
+		t.Errorf("%d messages, want %d: %+v", len(got), n, got)
+	}
+	return got
 }
 
 func find(t *testing.T, h store.HostRun, name string) store.Entry {

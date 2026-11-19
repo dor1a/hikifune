@@ -15,6 +15,7 @@ import (
 	"github.com/dor1a/hikifune/internal/auth"
 	"github.com/dor1a/hikifune/internal/auth/authtest"
 	"github.com/dor1a/hikifune/internal/inventory"
+	"github.com/dor1a/hikifune/internal/notify"
 	"github.com/dor1a/hikifune/internal/protocol"
 	"github.com/dor1a/hikifune/internal/server"
 	"github.com/dor1a/hikifune/internal/store"
@@ -44,9 +45,9 @@ func (f *fakeRunner) Active() *server.Activity {
 	return f.active
 }
 
-type fakeSchedule struct{ check, update server.Clock }
+type fakeSchedule struct{ check, update server.When }
 
-func (f fakeSchedule) Clocks() (server.Clock, server.Clock) { return f.check, f.update }
+func (f fakeSchedule) Times() (server.When, server.When) { return f.check, f.update }
 
 var t0 = time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
 
@@ -84,8 +85,9 @@ func fixture(t *testing.T) *store.JSON {
 func newServer(t *testing.T, st store.Store, r Runner, a *auth.Auth) (*Server, chan struct{}) {
 	t.Helper()
 	wake := make(chan struct{}, 1)
-	s, err := New(Config{Store: st, Runner: r, Schedule: fakeSchedule{server.Clock{Hour: 0, Minute: 0}, server.Clock{Hour: 1, Minute: 0}}, Wake: wake,
-		Location: time.UTC, DefaultCheck: server.Clock{Hour: 0, Minute: 0}, DefaultUpdate: server.Clock{Hour: 1, Minute: 0}, Watch: 2 * time.Minute,
+	check, upd := server.When{At: server.Clock{Hour: 0, Minute: 0}}, server.When{At: server.Clock{Hour: 1, Minute: 0}}
+	s, err := New(Config{Store: st, Runner: r, Schedule: fakeSchedule{check, upd}, Wake: wake,
+		Location: time.UTC, DefaultCheck: check, DefaultUpdate: upd, Watch: 2 * time.Minute,
 		Auth: a, Version: "v1",
 		Status: func(_ context.Context, a store.Agent) (protocol.Version, error) {
 			if a.Name == "b" {
@@ -226,16 +228,37 @@ func TestActions(t *testing.T) {
 func TestSettings(t *testing.T) {
 	st := fixture(t)
 	s, wake := newServer(t, st, &fakeRunner{}, nil)
+	// The real schedule, which reads what the page saves.
+	s.cfg.Schedule = &server.Schedule{Runner: &server.Runner{Store: st}, UpdateAt: server.Clock{Hour: 1}, Location: time.UTC}
 	h := s.Handler()
-	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, "From the environment: check 00:00, update 01:00") {
+	_, body := do(t, h, "GET", "/settings", nil)
+	if !strings.Contains(body, "From the environment: check every day at 00:00, update every day at 01:00") ||
+		!strings.Contains(body, `<option value="day" selected>every day</option>`) ||
+		!strings.Contains(body, `<span class="when-field" data-for="week" hidden>`) || !strings.Contains(body, `<option value="sat">Saturday</option>`) {
 		t.Errorf("settings page: %s", body)
 	}
-	res, _ := do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"}})
+	st.Update(func(s *store.State) error {
+		s.Settings.Template = "{{.Host}}"
+		return nil
+	})
+	res, _ := do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"},
+		"check_period": {"week"}, "check_weekday": {"sun"}, "check_day": {"1"}, "update_period": {"month"}, "update_weekday": {"sun"}, "update_day": {"last day"}})
 	if res.StatusCode != http.StatusSeeOther {
 		t.Fatalf("save: %d", res.StatusCode)
 	}
-	if got, _ := st.Read(); !got.Settings.Saved || got.Settings.CheckAt != "02:30" || got.Settings.UpdateAt != "03:00" {
+	if got, _ := st.Read(); !got.Settings.Saved || got.Settings.CheckAt != "02:30" || got.Settings.UpdateAt != "03:00" ||
+		got.Settings.CheckEvery != "sun" || got.Settings.UpdateEvery != "last" || got.Settings.Template != "{{.Host}}" ||
+		!got.Settings.SavedAt.Equal(t0.Add(2*time.Hour)) {
 		t.Fatalf("settings %+v", got.Settings)
+	}
+	// The saved period's field shows; the other stays hidden.
+	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<span class="when-field" data-for="week"><span class="muted">on</span>`) ||
+		!strings.Contains(body, `<option value="sun" selected>Sunday</option>`) || !strings.Contains(body, `name="update_day" value="last day"`) {
+		t.Errorf("saved schedule not shown")
+	}
+	if res, body := do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"}, "update_period": {"month"}, "update_day": {"40"}}); res.StatusCode != http.StatusUnprocessableEntity ||
+		!strings.Contains(body, `value="40"`) {
+		t.Errorf("day 40: %d", res.StatusCode)
 	}
 	select {
 	case <-wake:
@@ -246,8 +269,58 @@ func TestSettings(t *testing.T) {
 		t.Errorf("bad time: %d", res.StatusCode)
 	}
 	do(t, h, "POST", "/settings", url.Values{"reset": {"1"}})
-	if got, _ := st.Read(); got.Settings.Saved {
-		t.Error("reset kept the saved times")
+	if got, _ := st.Read(); got.Settings.Saved || got.Settings.CheckEvery != "" || got.Settings.Template != "{{.Host}}" {
+		t.Errorf("reset: %+v", got.Settings)
+	}
+}
+
+// The notification template is edited, checked and tried in Settings; the
+// webhook shows without its token.
+func TestNotificationSettings(t *testing.T) {
+	st := fixture(t)
+	var mu sync.Mutex
+	var posts []string
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		posts = append(posts, string(b))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+	s, _ := newServer(t, st, &fakeRunner{}, nil)
+	h := s.Handler()
+	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, "Not set, so no notifications are sent") {
+		t.Error("no webhook: no hint")
+	}
+	if _, body := do(t, h, "POST", "/settings/template/test", url.Values{"template": {""}}); !strings.Contains(body, "No webhook is set") {
+		t.Errorf("test without a webhook: %s", body)
+	}
+
+	s.cfg.Notifier = &notify.Notifier{Discord: &notify.Discord{URL: hook.URL + "/api/webhooks/42/secret-token"}}
+	_, body := do(t, h, "GET", "/settings", nil)
+	if !strings.Contains(body, "/api/webhooks/42/…") || strings.Contains(body, "secret-token") || !strings.Contains(body, `<span class="tag">default</span>`) {
+		t.Errorf("settings page: webhook or default not shown right")
+	}
+	if res, body := do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Nope}}"}}); res.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "Nope") {
+		t.Errorf("bad template: %d", res.StatusCode)
+	}
+	do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Kind}} on {{.Host}}\r\n"}})
+	if got, _ := st.Read(); got.Settings.Template != "{{.Kind}} on {{.Host}}\n" {
+		t.Errorf("saved template %q", got.Settings.Template)
+	}
+	if _, body := do(t, h, "POST", "/settings/template/test", url.Values{"template": {"test {{.Host}}"}}); !strings.Contains(body, "Sent a sample message") {
+		t.Errorf("send test: %s", body)
+	}
+	mu.Lock()
+	if len(posts) != 1 || !strings.Contains(posts[0], `"description":"test example-host"`) {
+		t.Errorf("posts %v", posts)
+	}
+	mu.Unlock()
+	// Saving the default, or asking for it, keeps the template empty.
+	do(t, h, "POST", "/settings/template", url.Values{"template": {notify.Default}})
+	if got, _ := st.Read(); got.Settings.Template != "" {
+		t.Errorf("default saved as %q", got.Settings.Template)
 	}
 }
 

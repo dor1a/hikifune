@@ -30,9 +30,19 @@ type Agent struct {
 // Settings are what the web UI changes. Until it saves them, the server
 // runs on the values its environment gives.
 type Settings struct {
+	// Saved is set once the web UI saved the schedule times.
 	Saved    bool   `json:"saved"`
 	CheckAt  string `json:"check_at,omitempty"`
 	UpdateAt string `json:"update_at,omitempty"`
+	// CheckEvery and UpdateEvery are day, a weekday (sun to sat) or a day of
+	// the month (1 to 31); empty is every day.
+	CheckEvery  string `json:"check_every,omitempty"`
+	UpdateEvery string `json:"update_every,omitempty"`
+	// SavedAt is when the schedule was last saved or reset; a changed time
+	// counts from then.
+	SavedAt time.Time `json:"saved_at,omitzero"`
+	// Template is the notification template; empty means the default (R19).
+	Template string `json:"template,omitempty"`
 }
 
 // Entry is one container in a run record (R31).

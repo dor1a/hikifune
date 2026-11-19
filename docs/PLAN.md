@@ -37,7 +37,7 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R3 | Works with Engine API 1.43 (Docker 24) and newer. The agent talks to each daemon at the daemon's own API version. Creating a container at an older version drops or changes settings a newer daemon has (health check start interval, per-network MAC address and gateway priority, umask, recursive read-only mounts), and inspecting at a version before 1.45 adds the container's short ID to its network aliases |
 | R4 | A container with no `hikifune.*` label is checked and updated automatically. `hikifune.protected=true` turns automatic updates off; a protected container is still checked, so its available update shows in the notification and the web UI |
 | R5 | The web UI lists every container on every host, protected ones too |
-| R6 | Checks run daily at 00:00 and updates at 01:00 by default, in the configured time zone |
+| R6 | Checks run daily at 00:00 and updates at 01:00 by default, in the configured time zone. Each of the two runs every day, every week on one weekday, or every month on one day; on days 29 to 31 a shorter month runs on its last day. `HIKIFUNE_CHECK_EVERY` and `HIKIFUNE_UPDATE_EVERY` take `day`, `sun` to `sat`, or `1` to `31` |
 | R7 | A check compares the registry digest of the container's image reference with the local image |
 | R8 | Private registries are reached with a Docker `config.json` mounted into the agent |
 | R9 | A container is recreated from the configuration the Engine API reports for it. Nothing is converted: health checks, device requests and every other field are passed through as JSON |
@@ -48,9 +48,9 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R14 | Rollback runs automatically for every update, scheduled or started with Update now (changed from scheduled only before M5: a failed update by hand would otherwise leave a broken new container and a renamed old one). There is no manual rollback button and old images are not kept |
 | R15 | A digest whose update failed is skipped at the next run. A newer digest is tried again |
 | R16 | Before updating a host, the server checks that the agent runs the same version as the server and that the Docker API is 1.43 or newer. If not, the host is skipped and the notification says why |
-| R17 | Notifications go to a Discord webhook by default. After the check run, each host gets one message listing Available. After the update run, each host gets one message listing Updated, Rolled back and Failed, plus the space that prune reclaimed. See [Notifications](#notifications) |
+| R17 | Notifications go to a Discord webhook after each scheduled run, and after `hikifune run`; runs started in the web UI are seen there and send nothing. After the check run, each host gets one message listing Available. After the update run, each host gets one message listing Updated, Rolled back and Failed, plus the space that prune reclaimed. In both, Failed also lists containers whose registry check failed, with the reason. A host with nothing to say gets no message. A notification is sent once the run has ended and the next may start, so a slow webhook holds back no run. See [Notifications](#notifications) |
 | R18 | Every rolled back and failed container carries a short summary of why |
-| R19 | hikifune ships a default Discord template, and the template can be edited in the web UI |
+| R19 | hikifune ships a default Discord template, and the template can be edited in the web UI. It is a Go `text/template` for the embed text, kept in the server state; it is saved only when it parses and renders a message of every kind. A template is bounded in size, in what it writes, in the numbers it names, in how deep its loops nest and in how long the strings it makes get, so a saved template cannot make the server spin or fill its memory. When it fails on a message, or writes nothing for one with something to say, the default writes that message. **Send test** posts a sample message with the template in the editor, saved or not |
 | R20 | The old image is pruned after a successful update |
 | R21 | Written in Go. Images `hikifune` and `hikifune-agent` |
 | R22 | The new configuration keeps what was set on the container and drops what came from the old image. See [Building the new configuration](#building-the-new-configuration). Copying `Config` whole would pin the old image's defaults, so a new image that changes `PATH`, an entrypoint or its health check would never get the change |
@@ -67,14 +67,14 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R33 | `HIKIFUNE_AUTH` has no default, so the server never starts open by accident. `oidc` signs users in through any standard OIDC provider in the app, as ukai and noroshi do; `none` leaves access control to a proxy in front, such as Cloudflare Access, and the server should then listen only where that proxy reaches it. The web UI can recreate containers on every host, so an open server is not an option |
 | R34 | **Check now** for a host or all hosts, and **Update now** for one container, in the web UI. Update now works on protected containers after a confirmation, and on check-only hosts; it ignores the failed digest list and rolls back like any update (R14). It sends the ID of the container the page showed, and does nothing to a container recreated since. Only one run goes at a time: Check now and Update now are refused while a run goes, and a scheduled run waits for it to end, then starts only if its time was not changed meanwhile |
 | R35 | A check-only switch per host: the host is checked on schedule but not updated then (for the first days on a host, and for hosts where updates should wait). Turning it on also stops the scheduled updates still to come in a run going on |
-| R36 | The schedule times set in the web UI are kept in the server state and win over `HIKIFUNE_CHECK_AT` and `HIKIFUNE_UPDATE_AT`, which only give the first values. Saving them takes effect at once |
+| R36 | The schedule set in the web UI is kept in the server state and wins over `HIKIFUNE_CHECK_EVERY`, `HIKIFUNE_CHECK_AT`, `HIKIFUNE_UPDATE_EVERY` and `HIKIFUNE_UPDATE_AT`, which only give the first values. Saving it takes effect at once, counted from the moment it was saved |
+| R37 | The Discord webhook URL comes from `HIKIFUNE_DISCORD_WEBHOOK_URL` only; with none set, nothing is sent. The URL holds the webhook's token, so the web UI shows it with the token hidden and it never reaches a log or an error. Errors keep only Discord's own message, with the token taken out, and a redirect is not followed. `HIKIFUNE_DISCORD_AVATAR_URL` sets the avatar; empty keeps the one set on the webhook |
 
 ### Proposed
 
 | ID | Proposal | Why |
 | -- | -- | -- |
 | P7 | The Docker and registry clients are written on `net/http` without the Docker SDK | Few dependencies, and the API version stays under our control |
-| P10 | A **Send test** button for the notification template | Template edits are checked without waiting for a run |
 
 ### Not doing
 
@@ -140,7 +140,7 @@ Failed
 Reclaimed 4.8 GB
 ```
 
-Proposed: send the message as a Discord embed under the hikifune name and logo, and send nothing for a host when every section is empty.
+The message is a Discord embed sent under the hikifune name: the title is the host, the color the worst result (red for rolled back, failed or left out, green for updated, blue for available), the footer the run and its time. The template writes the embed text only. Text longer than an embed takes (4096 characters) goes in parts, cut at line ends. Container names go in code spans and other values are escaped, so Discord reads none of them as markdown, and the message pings no one. A rate limit is waited out as Discord asks, up to 5 minutes; a longer one fails the message. A server error is tried again, which could post a message twice if Discord took it before failing; Discord answers with the result, so this is rare.
 
 ## Milestones
 
@@ -229,7 +229,8 @@ Done when: every container on every host appears, protected ones marked, and bot
 
 - Discord webhook with the default template ([Notifications](#notifications)).
 - Template variables: host, run type (check or update), the four lists, image references, reasons and reclaimed space.
-- Send test (P10).
+- Send test (R19).
+- The schedule's period per run: every day, a weekday, or a day of the month (R6).
 - Splits a host's message when it is longer than Discord allows.
 
 Done when: a check run sends one Available message per host, an update run with updated, rolled back and failed containers sends one message per host with every reason, and an edited template is used.
