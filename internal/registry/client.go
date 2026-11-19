@@ -110,49 +110,82 @@ func (e *StatusError) Error() string {
 }
 
 // Digest asks the registry which manifest digest a tagged reference points
-// at, with a HEAD request that downloads nothing. A 401 is answered once
-// with the credentials the registry's WWW-Authenticate asks for: basic auth,
-// or a bearer token from its token server.
+// at, with a HEAD request that downloads nothing.
 func (c *Client) Digest(ctx context.Context, ref Reference) (string, error) {
 	if ref.Tag == "" {
 		return "", fmt.Errorf("%s has no tag to look up", ref)
 	}
-	target := "https://" + apiHost(ref.Registry) + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(ref.Tag)
-	key := ref.Name()
-	resp, err := c.head(ctx, target, c.cached(key))
+	resp, err := c.manifest(ctx, ref, ref.Tag)
 	if err != nil {
 		return "", err
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		ch, ok := challengeOf(resp.Header)
-		if !ok {
-			return "", &StatusError{Name: key, Status: resp.StatusCode,
-				Message: "no WWW-Authenticate challenge; " + c.denied(ref)}
-		}
-		auth, err := c.authorize(ctx, ch, ref)
-		if err != nil {
-			return "", err
-		}
-		if resp, err = c.head(ctx, target, auth.header); err != nil {
-			return "", err
-		}
-		if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
-			// The credentials were taken, even if the tag is missing.
-			c.store(key, auth)
-		}
-	}
 	if resp.StatusCode != http.StatusOK {
-		e := &StatusError{Name: key, Status: resp.StatusCode}
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			e.Message = c.denied(ref)
-		}
-		return "", e
+		return "", c.statusError(ref, resp.StatusCode)
 	}
 	digest := resp.Header.Get("Docker-Content-Digest")
 	if !validDigest(digest) {
-		return "", fmt.Errorf("registry %s: no valid Docker-Content-Digest in the answer (got %q)", key, digest)
+		return "", fmt.Errorf("registry %s: no valid Docker-Content-Digest in the answer (got %q)", ref.Name(), digest)
 	}
 	return digest, nil
+}
+
+// Has reports whether the registry has a manifest with this digest in ref's
+// repository, with a HEAD request that downloads nothing. A 404 is false.
+func (c *Client) Has(ctx context.Context, ref Reference, digest string) (bool, error) {
+	if !validDigest(digest) {
+		return false, fmt.Errorf("%q is not a digest", digest)
+	}
+	resp, err := c.manifest(ctx, ref, digest)
+	if err != nil {
+		return false, err
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	}
+	return false, c.statusError(ref, resp.StatusCode)
+}
+
+// manifest sends a HEAD for one tag or digest in ref's repository. A 401 is
+// answered once with the credentials the registry's WWW-Authenticate asks
+// for: basic auth, or a bearer token from its token server.
+func (c *Client) manifest(ctx context.Context, ref Reference, reference string) (*http.Response, error) {
+	target := "https://" + apiHost(ref.Registry) + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(reference)
+	key := ref.Name()
+	resp, err := c.head(ctx, target, c.cached(key))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	ch, ok := challengeOf(resp.Header)
+	if !ok {
+		return nil, &StatusError{Name: key, Status: resp.StatusCode,
+			Message: "no WWW-Authenticate challenge; " + c.denied(ref)}
+	}
+	auth, err := c.authorize(ctx, ch, ref)
+	if err != nil {
+		return nil, err
+	}
+	if resp, err = c.head(ctx, target, auth.header); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		// The credentials were taken, even if the manifest is missing.
+		c.store(key, auth)
+	}
+	return resp, nil
+}
+
+func (c *Client) statusError(ref Reference, status int) error {
+	e := &StatusError{Name: ref.Name(), Status: status}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		e.Message = c.denied(ref)
+	}
+	return e
 }
 
 func (c *Client) head(ctx context.Context, target, auth string) (*http.Response, error) {

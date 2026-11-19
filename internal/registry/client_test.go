@@ -24,6 +24,7 @@ type fakeRegistry struct {
 	broken    map[string]int  // repository -> status to answer with
 	noDigest  map[string]bool // repositories answered without Docker-Content-Digest
 	manifests map[string]fakeManifest
+	old       map[string]bool   // repository@digest of manifests no tag points at
 	redirect  map[string]string // repository -> where an authorized HEAD is redirected
 	realm     string            // bearer realm, the fake's own /token when empty
 	tokenCode int               // status the token server answers with, 200 when 0
@@ -44,7 +45,7 @@ func newFakeRegistry(t *testing.T, auth string) *fakeRegistry {
 	t.Helper()
 	f := &fakeRegistry{auth: auth, user: "alice", pass: "s3cret",
 		private: map[string]bool{}, broken: map[string]int{}, noDigest: map[string]bool{},
-		manifests: map[string]fakeManifest{}, redirect: map[string]string{}}
+		manifests: map[string]fakeManifest{}, old: map[string]bool{}, redirect: map[string]string{}}
 	f.srv = httptest.NewTLSServer(f)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -96,6 +97,19 @@ func (f *fakeRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if status := f.broken[repo]; status != 0 {
 		w.WriteHeader(status)
+		return
+	}
+	if strings.HasPrefix(tag, "sha256:") {
+		// A digest: any manifest of the repository with it, tagged or not.
+		found := f.old[repo+"@"+tag]
+		for key, m := range f.manifests {
+			found = found || strings.HasPrefix(key, repo+":") && m.digest == tag
+		}
+		if !found {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", tag)
 		return
 	}
 	m, ok := f.manifests[repo+":"+tag]

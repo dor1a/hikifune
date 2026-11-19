@@ -7,48 +7,72 @@ import (
 	"testing"
 )
 
+// digestC is a digest the fake registry never has.
+const digestC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
 func TestCheck(t *testing.T) {
 	f := newFakeRegistry(t, "bearer")
 	f.manifests["team/app:1"] = fakeManifest{manifestTypes[0], digestA}
+	f.old["team/app@"+digestB] = true // what team/app:1 pointed at before
 	f.manifests["me/built:dev"] = fakeManifest{manifestTypes[0], digestA}
 	f.private["me/secret"] = true
 	f.manifests["me/secret:1"] = fakeManifest{manifestTypes[0], digestA}
 	f.broken["team/down"] = http.StatusBadGateway
 	c := f.client(nil)
 	h := f.host()
+	app := func(d string) []string { return []string{h + "/team/app@" + d} }
 
 	tests := []struct {
 		name   string
 		target Target
 		want   Result
 	}{
-		{"same digest", Target{h + "/team/app:1", []string{h + "/team/app@" + digestA}, false, ""},
+		{"same digest", Target{Image: h + "/team/app:1", RepoDigests: app(digestA)},
 			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
-		{"the tag moved", Target{h + "/team/app:1", []string{h + "/team/app@" + digestB}, false, ""},
+		{"the tag moved on the registry", Target{Image: h + "/team/app:1", RepoDigests: app(digestB)},
 			Result{Status: UpdateAvailable, LocalDigest: digestB, RemoteDigest: digestA}},
-		{"one of several digests matches", Target{h + "/team/app:1", []string{h + "/team/app@" + digestB, h + "/team/app@" + digestA}, false, ""},
+		{"one of several digests matches", Target{Image: h + "/team/app:1", RepoDigests: append(app(digestB), app(digestA)...)},
 			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
-		{"pinned", Target{h + "/team/app@" + digestB, nil, false, ""}, Result{Status: Pinned, LocalDigest: digestB}},
-		{"no repo digest (Docker 24 local build)", Target{h + "/me/built:dev", []string{}, false, ""}, Result{Status: NotCheckable}},
-		{"a repo digest of another repository", Target{h + "/team/app:1", []string{"docker.io/library/app@" + digestA}, false, ""}, Result{Status: NotCheckable}},
-		{"a never-pushed build with its own repo digest (containerd store)", Target{h + "/me/new:dev", []string{h + "/me/new@" + digestB}, false, ""},
+		{"pinned", Target{Image: h + "/team/app@" + digestB}, Result{Status: Pinned, LocalDigest: digestB}},
+		{"no repo digest (Docker 24 local build)", Target{Image: h + "/me/built:dev", RepoDigests: []string{}}, Result{Status: NotCheckable}},
+		{"a repo digest of another repository", Target{Image: h + "/team/app:1", RepoDigests: []string{"docker.io/library/app@" + digestA}}, Result{Status: NotCheckable}},
+		{"a never-pushed build with its own repo digest (containerd store)", Target{Image: h + "/me/new:dev", RepoDigests: []string{h + "/me/new@" + digestB}},
 			Result{Status: NotCheckable, LocalDigest: digestB}},
-		{"private without credentials", Target{h + "/me/secret:1", []string{h + "/me/secret@" + digestA}, false, ""},
+		{"a never-pushed build named like a registry image (containerd store)", Target{Image: h + "/me/built:dev", RepoDigests: []string{h + "/me/built@" + digestC}},
+			Result{Status: NotCheckable, LocalDigest: digestC, RemoteDigest: digestA}},
+		{"an old digest the registry deleted", Target{Image: h + "/team/app:1", RepoDigests: app(digestC)},
+			Result{Status: NotCheckable, LocalDigest: digestC, RemoteDigest: digestA}},
+		{"private without credentials", Target{Image: h + "/me/secret:1", RepoDigests: []string{h + "/me/secret@" + digestA}},
 			Result{Status: NotCheckable, LocalDigest: digestA}},
-		{"registry error", Target{h + "/team/down:1", []string{h + "/team/down@" + digestA}, false, ""},
+		{"registry error", Target{Image: h + "/team/down:1", RepoDigests: []string{h + "/team/down@" + digestA}},
 			Result{Status: Failed, LocalDigest: digestA}},
-		{"an image ID", Target{"sha256:" + digestA[7:], nil, false, ""}, Result{Status: NotCheckable}},
-		{"the tag moved and the old image kept no digest (containerd store)", Target{h + "/team/app:1", []string{}, true, ""},
+		{"an image ID", Target{Image: "sha256:" + digestA[7:]}, Result{Status: NotCheckable}},
+		{"the tag moved to a pull and the old image kept no digest (containerd store)",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, TagMoved: true, ImageID: digestB, NamedRepoDigests: app(digestA)},
 			Result{Status: UpdateAvailable, RemoteDigest: digestA}},
-		{"the tag moved to a local build the registry does not have", Target{h + "/me/new:dev", nil, true, ""},
+		{"a local build with no digest, then the tag moved to a pull",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, TagMoved: true, ImageID: digestC, NamedRepoDigests: app(digestA)},
+			Result{Status: NotCheckable, RemoteDigest: digestA}},
+		{"no digest and no image ID, then the tag moved to a pull",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, TagMoved: true, NamedRepoDigests: app(digestA)},
+			Result{Status: NotCheckable, RemoteDigest: digestA}},
+		{"the tag moved to a local build the registry does not have",
+			Target{Image: h + "/me/new:dev", TagMoved: true, NamedRepoDigests: []string{h + "/me/new@" + digestB}},
 			Result{Status: NotCheckable}},
-		{"the tag moved but the old image kept its digest (classic store)", Target{h + "/team/app:1", []string{h + "/team/app@" + digestA}, true, ""},
+		{"the tag moved to a local build with its own repo digest (containerd store)",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, TagMoved: true, NamedRepoDigests: app(digestC)},
+			Result{Status: NotCheckable}},
+		{"the tag moved to a local build with no repo digest (classic store)",
+			Target{Image: h + "/team/app:1", RepoDigests: app(digestB), TagMoved: true, NamedRepoDigests: []string{}},
+			Result{Status: NotCheckable}},
+		{"the tag moved but the old image kept its digest (classic store)",
+			Target{Image: h + "/team/app:1", RepoDigests: app(digestA), TagMoved: true, NamedRepoDigests: app(digestA)},
 			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
 		{"the tag moved and the registry went back to what runs (containerd store)",
-			Target{Image: h + "/team/app:1", RepoDigests: []string{}, TagMoved: true, ImageID: digestA},
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, TagMoved: true, ImageID: digestA, NamedRepoDigests: app(digestB)},
 			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
 		{"the image ID is the pulled digest (containerd store)",
-			Target{Image: h + "/team/app:1", RepoDigests: []string{h + "/team/app@" + digestB}, ImageID: digestA},
+			Target{Image: h + "/team/app:1", RepoDigests: app(digestB), ImageID: digestA},
 			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
 	}
 	for _, tt := range tests {
@@ -75,11 +99,13 @@ func TestCheckAllAsksOncePerImage(t *testing.T) {
 	f.manifests["team/app:1"] = fakeManifest{manifestTypes[0], digestA}
 	f.manifests["team/web:2"] = fakeManifest{manifestTypes[0], digestB}
 	h := f.host()
-	app := Target{h + "/team/app:1", []string{h + "/team/app@" + digestA}, false, ""}
-	web := Target{h + "/team/web:2", []string{h + "/team/web@" + digestA}, false, ""}
+	f.old["team/web@"+digestA] = true
+	app := Target{Image: h + "/team/app:1", RepoDigests: []string{h + "/team/app@" + digestA}}
+	web := Target{Image: h + "/team/web:2", RepoDigests: []string{h + "/team/web@" + digestA}}
 	got := f.client(nil).CheckAll(context.Background(), []Target{app, web, app})
-	if heads, _ := f.counts(); heads != 2 {
-		t.Errorf("%d HEADs for two distinct images, want 2", heads)
+	// One HEAD per tag, and one for the digest web runs, which differs.
+	if heads, _ := f.counts(); heads != 3 {
+		t.Errorf("%d HEADs for two distinct images, want 3", heads)
 	}
 	want := []Status{UpToDate, UpdateAvailable, UpToDate}
 	for i, r := range got {

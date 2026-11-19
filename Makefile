@@ -34,7 +34,10 @@ E2E_HOSTS = docker24 docker29
 # Docker that runs them.
 e2e:
 	$(E2E) up -d --wait
-	for h in $(E2E_HOSTS); do $(E2E) exec -T $$h sh -s < deploy/compose/e2e/containers.sh || exit 1; done
+	for h in $(E2E_HOSTS); do \
+		$(E2E) exec -T $$h sh -s < deploy/compose/e2e/containers.sh || exit 1; \
+		$(E2E) exec -T $$h sh -s < deploy/compose/e2e/update.sh || exit 1; \
+	done
 	docker run --rm --network hikifune-e2e_default \
 		-v hikifune-gomod:/go/pkg/mod -v hikifune-gocache:/root/.cache/go-build \
 		-v "$(CURDIR):/src" -w /src \

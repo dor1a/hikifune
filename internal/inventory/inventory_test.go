@@ -123,11 +123,11 @@ func TestCollect(t *testing.T) {
 	if l := byName["local"]; l.RepoDigests == nil || len(l.RepoDigests) != 0 || l.ImageError != "" || l.TagMoved {
 		t.Errorf("local = %+v", l)
 	}
-	if m := byName["moved"]; !m.TagMoved || len(m.RepoDigests) != 0 {
-		t.Errorf("moved = %+v, want the tag marked as moved", m)
+	if m := byName["moved"]; !m.TagMoved || len(m.RepoDigests) != 0 || len(m.NamedRepoDigests) != 1 || m.NamedRepoDigests[0] != "caddy@sha256:bbb" {
+		t.Errorf("moved = %+v, want the tag marked as moved with the digest of what it names now", m)
 	}
-	if web.TagMoved || o.TagMoved {
-		t.Errorf("tag moved on web %v or orphan %v", web.TagMoved, o.TagMoved)
+	if web.TagMoved || o.TagMoved || web.NamedRepoDigests != nil {
+		t.Errorf("tag moved on web %v or orphan %v, named digests %v", web.TagMoved, o.TagMoved, web.NamedRepoDigests)
 	}
 	// By ID: nginx once for three containers, built, deleted and caddy-old.
 	// By reference: nginx:1.27 once, local/built:1, caddy:2-alpine and the

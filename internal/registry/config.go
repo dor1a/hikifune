@@ -108,6 +108,29 @@ func (k *Keychain) Get(registry string) (Credentials, bool) {
 	return c, ok
 }
 
+// PullAuth is the X-Registry-Auth value that lets the Docker daemon pull
+// from registry with the credentials of the auths section, or "" to pull
+// anonymously.
+func (k *Keychain) PullAuth(registry string) string {
+	if k == nil {
+		return ""
+	}
+	c, ok := k.Get(registry)
+	if !ok {
+		return ""
+	}
+	server := registryKey(registry)
+	if server == DockerHub {
+		server = dockerHubConfigKey
+	}
+	b, _ := json.Marshal(struct {
+		Username      string `json:"username"`
+		Password      string `json:"password"`
+		ServerAddress string `json:"serveraddress"`
+	}{c.Username, c.Password, server})
+	return base64.URLEncoding.EncodeToString(b)
+}
+
 // Helper names the credential helper that keeps a registry's credentials
 // when the auths section has none, or "" when there is none.
 func (k *Keychain) Helper(registry string) string {

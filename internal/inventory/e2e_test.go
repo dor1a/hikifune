@@ -41,9 +41,13 @@ func TestE2EInventory(t *testing.T) {
 
 func checkE2E(t *testing.T, rep Report) {
 	t.Helper()
+	// The update tests' containers carry hikifune.e2e=update and change
+	// while this runs.
 	byName := map[string]Container{}
 	for _, ct := range rep.Containers {
-		byName[ct.Name] = ct
+		if ct.Labels["hikifune.e2e"] != "update" {
+			byName[ct.Name] = ct
+		}
 	}
 	want := []struct {
 		name       string
@@ -63,8 +67,8 @@ func checkE2E(t *testing.T, rep Report) {
 		{"local-build", false, false, "running"},
 		{"tag-moved", false, false, "running"},
 	}
-	if len(rep.Containers) != len(want) {
-		t.Errorf("%d containers, want %d", len(rep.Containers), len(want))
+	if len(byName) != len(want) {
+		t.Errorf("%d containers, want %d", len(byName), len(want))
 	}
 	for _, w := range want {
 		ct, ok := byName[w.name]

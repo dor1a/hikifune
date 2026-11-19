@@ -49,7 +49,13 @@ type Target struct {
 	// registry even when the image has lost its repo digests. On the classic
 	// store it is the config digest, which never equals a manifest digest.
 	ImageID string
+	// NamedRepoDigests are the repo digests of the image Image names now,
+	// when TagMoved is set. Pulling would replace that image.
+	NamedRepoDigests []string
 }
+
+// localBuild is the reason given for an image the registry has never had.
+const localBuild = "so it was built on this host or deleted from the registry, and an update would replace it with the registry's image"
 
 // Check compares the digest the registry has for an image reference with
 // the host's repo digests for the same repository.
@@ -60,6 +66,18 @@ func (c *Client) Check(ctx context.Context, t Target) Result {
 	}
 	if ref.Digest != "" {
 		return Result{Status: Pinned, LocalDigest: ref.Digest}
+	}
+	if t.TagMoved {
+		// Pulling moves the tag back to the registry's image. Make sure what
+		// the tag names now came from there.
+		named := localDigests(ref, t.NamedRepoDigests)
+		if len(named) == 0 {
+			return Result{Status: NotCheckable,
+				Reason: t.Image + " now names an image with no repo digest for " + ref.Name() + ", " + localBuild}
+		}
+		if r, ok := c.fromRegistry(ctx, ref, named, t.Image+" now names an image the registry does not have"); !ok {
+			return r
+		}
 	}
 	local := localDigests(ref, t.RepoDigests)
 	if len(local) == 0 && t.TagMoved {
@@ -77,6 +95,14 @@ func (c *Client) Check(ctx context.Context, t Target) Result {
 			// The registry points the tag back at what the container runs.
 			return Result{Status: UpToDate, LocalDigest: remote, RemoteDigest: remote}
 		}
+		// With the containerd store the image ID of a pulled image is the
+		// digest that was pulled, so the registry still has it. A local
+		// build, or any image on the classic store, has an ID the registry
+		// does not know.
+		if r, ok := c.fromRegistry(ctx, ref, []string{t.ImageID}, moved+", and the registry does not have the image it runs"); !ok {
+			r.RemoteDigest = remote
+			return r
+		}
 		return Result{Status: UpdateAvailable, RemoteDigest: remote, Reason: moved}
 	}
 	if len(local) == 0 {
@@ -92,7 +118,33 @@ func (c *Client) Check(ctx context.Context, t Target) Result {
 	case slices.Contains(local, remote) || remote == t.ImageID:
 		return Result{Status: UpToDate, LocalDigest: remote, RemoteDigest: remote}
 	}
+	// With the containerd store a never pushed local build has a repo digest
+	// for its own name, so a name the registry also has would look updated.
+	if r, ok := c.fromRegistry(ctx, ref, local, "the registry does not have the digest this host runs"); !ok {
+		r.LocalDigest, r.RemoteDigest = local[0], remote
+		return r
+	}
 	return Result{Status: UpdateAvailable, LocalDigest: local[0], RemoteDigest: remote}
+}
+
+// fromRegistry asks whether the registry has any of digests. When it has
+// none, or cannot tell, the result says why and ok is false.
+func (c *Client) fromRegistry(ctx context.Context, ref Reference, digests []string, missing string) (Result, bool) {
+	for _, d := range digests {
+		if !validDigest(d) {
+			continue
+		}
+		has, err := c.Has(ctx, ref, d)
+		switch {
+		case IsNotCheckable(err):
+			return Result{Status: NotCheckable, Reason: err.Error()}, false
+		case err != nil:
+			return Result{Status: Failed, Reason: err.Error()}, false
+		case has:
+			return Result{}, true
+		}
+	}
+	return Result{Status: NotCheckable, Reason: missing + ", " + localBuild}, false
 }
 
 // localDigests returns the digests of the repo digests that name the same
@@ -120,7 +172,10 @@ func (c *Client) CheckAll(ctx context.Context, targets []Target) []Result {
 	for i, t := range targets {
 		digests := slices.Clone(t.RepoDigests)
 		slices.Sort(digests)
-		key := fmt.Sprint(t.TagMoved) + "\x00" + t.ImageID + "\x00" + t.Image + "\x00" + strings.Join(digests, "\x00")
+		named := slices.Clone(t.NamedRepoDigests)
+		slices.Sort(named)
+		key := fmt.Sprint(t.TagMoved) + "\x00" + t.ImageID + "\x00" + t.Image + "\x00" + strings.Join(digests, "\x00") +
+			"\x01" + strings.Join(named, "\x00")
 		j, ok := jobs[key]
 		if !ok {
 			j = &job{target: t}

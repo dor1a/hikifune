@@ -51,12 +51,15 @@ type Container struct {
 	// the container runs: a later pull or build moved the tag, and the
 	// container was not recreated. With the containerd image store the old
 	// image is left with no repo digest at all.
-	TagMoved   bool              `json:"tag_moved,omitempty"`
-	Labels     map[string]string `json:"labels"`
-	Protected  bool              `json:"protected"`
-	LabelError string            `json:"label_error,omitempty"`
-	State      string            `json:"state"`
-	Health     string            `json:"health,omitempty"`
+	TagMoved bool `json:"tag_moved,omitempty"`
+	// NamedRepoDigests are the repo digests of the image the reference names
+	// now, when the tag moved. Pulling would replace that image.
+	NamedRepoDigests []string          `json:"named_repo_digests,omitempty"`
+	Labels           map[string]string `json:"labels"`
+	Protected        bool              `json:"protected"`
+	LabelError       string            `json:"label_error,omitempty"`
+	State            string            `json:"state"`
+	Health           string            `json:"health,omitempty"`
 }
 
 // Collect reads every container on the daemon, stopped ones too. It only
@@ -67,7 +70,7 @@ func Collect(ctx context.Context, c *docker.Client) (Report, error) {
 		Version:       v.Version,
 		APIVersion:    v.APIVersion,
 		MinAPIVersion: v.MinAPIVersion,
-		RequestedAPI:  docker.APIVersion,
+		RequestedAPI:  c.APIVersion(),
 		OS:            v.Os,
 		Arch:          v.Arch,
 	}}
@@ -166,6 +169,9 @@ func describe(ctx context.Context, c *docker.Client, images *imageCache, id stri
 			return Container{}, false, err
 		default:
 			item.TagMoved = named.ID != ct.Image
+			if item.TagMoved {
+				item.NamedRepoDigests = append([]string{}, named.RepoDigests...)
+			}
 		}
 	}
 	return item, true, nil

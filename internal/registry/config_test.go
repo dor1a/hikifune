@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,5 +135,39 @@ func TestParseConfigPrefersTheBareHostKey(t *testing.T) {
 	}
 	if c, _ := k.Get("z.example"); c.Username != "new" {
 		t.Errorf("credentials = %+v, want the bare host key", c)
+	}
+}
+
+func TestPullAuth(t *testing.T) {
+	k, err := ParseConfig([]byte(`{"auths":{
+		"https://index.docker.io/v1/":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("hub:pw1")) + `"},
+		"ghcr.io":{"username":"gh","password":"pw2"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode := func(s string) map[string]string {
+		t.Helper()
+		b, err := base64.URLEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("not base64url: %q", s)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	if m := decode(k.PullAuth("docker.io")); m["username"] != "hub" || m["password"] != "pw1" || m["serveraddress"] != "https://index.docker.io/v1/" {
+		t.Errorf("docker.io: %v", m)
+	}
+	if m := decode(k.PullAuth("ghcr.io")); m["username"] != "gh" || m["password"] != "pw2" || m["serveraddress"] != "ghcr.io" {
+		t.Errorf("ghcr.io: %v", m)
+	}
+	if got := k.PullAuth("quay.io"); got != "" {
+		t.Errorf("quay.io: %q, want anonymous", got)
+	}
+	var none *Keychain
+	if got := none.PullAuth("ghcr.io"); got != "" {
+		t.Errorf("nil keychain: %q", got)
 	}
 }

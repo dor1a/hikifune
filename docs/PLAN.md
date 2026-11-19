@@ -34,7 +34,7 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | -- | -- |
 | R1 | One agent per Docker host and one server that holds the schedule, the web UI, the notifications and the state |
 | R2 | The agent reaches the Docker Engine API through a socket proxy or the socket itself. It needs `VERSION`, `PING`, `INFO`, `CONTAINERS`, `IMAGES`, `NETWORKS` and `POST` |
-| R3 | Works with Engine API 1.43 (Docker 24) and newer. The agent asks for API 1.43 |
+| R3 | Works with Engine API 1.43 (Docker 24) and newer. The agent talks to each daemon at the daemon's own API version. Creating a container at an older version drops or changes settings a newer daemon has (health check start interval, per-network MAC address and gateway priority, umask, recursive read-only mounts), and inspecting at a version before 1.45 adds the container's short ID to its network aliases |
 | R4 | A container with no `hikifune.*` label is checked and updated automatically. `hikifune.protected=true` turns automatic updates off |
 | R5 | The web UI lists every container on every host, protected ones too |
 | R6 | Checks run daily at 00:00 and updates at 01:00 by default, in the configured time zone |
@@ -53,13 +53,15 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R19 | hikifune ships a default Discord template, and the template can be edited in the web UI |
 | R20 | The old image is pruned after a successful update |
 | R21 | Written in Go. Images `hikifune` and `hikifune-agent` |
+| R22 | The new configuration keeps what was set on the container and drops what came from the old image. See [Building the new configuration](#building-the-new-configuration). Copying `Config` whole would pin the old image's defaults, so a new image that changes `PATH`, an entrypoint or its health check would never get the change |
+| R23 | The step 3 comparison checks what hikifune sent, not the whole inspect output: every value sent is in the new container, it runs the pulled image, every network is attached, and every mount of the old container is in the new one. Defaults the new image adds are expected to differ |
+| R24 | A scheduled update is rolled back when the new container exits, restarts or reports unhealthy within the watch window, or when it has a health check and is not healthy at the end of the window. The window is 2 minutes, one server setting |
+| R25 | When the registry digest differs from the host's, the check also asks the registry for the host's digest (or, for an image that lost its repo digest, its image ID). If the registry does not have it, the image was built on the host (or its manifest was deleted there), and the container is reported not checkable instead of update available, so a local build is never replaced by a registry image of the same name. The same goes for a moved tag that now names a local build |
 
 ### Proposed
 
 | ID | Proposal | Why |
 | -- | -- | -- |
-| P1 | Copy `HostConfig` and the network endpoints as they are. In `Config`, drop the values that came from the old image (environment variables, labels, `Cmd`, `Entrypoint`, `Healthcheck`, `WorkingDir`, `User`, exposed ports and volumes that equal the old image's own config) and keep everything that was set on the container | Copying `Config` whole would pin the old image's defaults. A new image that changes `PATH`, an entrypoint or its health check would never get the change |
-| P2 | The step 3 comparison checks what was copied (P1), not the whole inspect output | The new image's own defaults are expected to differ |
 | P3 | **Check now** for a host or all hosts, and **Update now** for one container, in the web UI. Manual updates do not roll back automatically (R14) | A fix often should not wait for 01:00 |
 | P4 | hikifune never recreates its own server or agent containers. It shows their available updates | An agent that stops itself mid-update cannot roll back |
 | P5 | Update dependencies before the containers that depend on them, using the `com.docker.compose.depends_on` label when it is present | Avoids restarting an app against a database that is about to restart |
@@ -68,7 +70,6 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | P8 | Configuration through `HIKIFUNE_*` environment variables. Every key is listed in `.env.example`, even when empty | One place to see every setting |
 | P9 | The server keeps a run history (the last N runs) with each container's result and reason | The web UI and the notification come from the same record |
 | P10 | A **Send test** button for the notification template | Template edits are checked without waiting for a run |
-| P11 | Rollback criteria: roll back if the new container exits or restarts within a watch window. If it has a health check, it must also be healthy by the end of the window. The window defaults to 2 minutes | Covers both images with and without health checks |
 
 ### Not doing
 
@@ -77,16 +78,32 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | Manual rollback button, keeping old images | Decided (R14) |
 | Pre and post update hooks, update delays, health watching outside updates | Never used in tugtainer |
 | Converting any container setting into CLI flags or another format | The cause of most tugtainer failures |
+| Updating by committing image digests to the compose repository and letting the agent apply them, like Argo CD for compose | Decided against before M3. On the hosts this replaces, 46 of 59 image references are `latest` or default to it, so a recreated container does not leave the repository behind. Committing would need every reference pinned and write access to the repository from the hosts, and it leaves out containers outside compose files and users without such a repository |
 
 ## Updating one container
 
-1. Pull the new image.
-2. Inspect the old container and its image, and build the new configuration (R9, P1).
-3. Create the new container under a temporary name with the first network. Inspect it and compare it with what was copied (P2). If it differs, remove the new container and report it.
+Only running containers are updated. A container created with `--rm` is refused: stopping it would remove it and leave nothing to roll back to.
+
+1. Ask the registry check (R25) about the image; only update available goes on. Pull the new image. If it is the image the container already runs, stop here. If it is not the digest the check saw, another pull or build moved the tag in between, and the update fails.
+2. Inspect the old container and both images, and build the new configuration (R9, R22).
+3. Create the new container under a temporary name with its primary network, and connect the other networks while it is still stopped. Inspect it and compare (R23). If it differs, remove the new container and report it.
 4. Stop the old container and rename it.
-5. Give the new container the original name and connect every remaining network while it is still stopped.
-6. Start the new container and watch it (P11).
-7. If it passes, remove the old container and prune the old image. If it fails, roll back (R11).
+5. Give the new container the original name.
+6. Start the new container and watch it (R24).
+7. If it passes, remove the old container, and the old image when nothing else uses it. If it fails, roll back (R11).
+
+A temporary name already taken, for example by a container left from an interrupted update, fails the update before anything is stopped. hikifune never removes such a container itself, since it may be the only copy of the previous version.
+
+Each call that changes a container (create, connect, stop, rename, start) is sent whole even when the update is cancelled, so its outcome is always known. A cancel is taken between steps: before the old container is stopped it removes the new one, after that it rolls back. A rollback counts only when the old container runs under its own name again.
+
+### Building the new configuration
+
+- `HostConfig` is copied as it is. The anonymous volumes the old container uses (from the image's `VOLUME` lines, a compose volume without a source, or a bind without a source) are mounted again at the same paths, so their data stays.
+- In `Config`, a value is dropped when it equals the old image's: each environment variable, each label, each exposed port and volume, and `Healthcheck`, `WorkingDir`, `User`, `StopSignal` and `Shell`. Everything else is kept.
+- `Entrypoint` is dropped when it equals the old image's. `Cmd` is dropped only when `Entrypoint` was dropped and `Cmd` equals the old image's too, because Docker does not apply an image's `Cmd` to a container with its own entrypoint. An empty list is not the same as none here: an empty entrypoint clears the image's and is kept.
+- The default host name, which is the old container's short ID, is dropped, and so is a host name under the `host` or `container:` network mode.
+- Network endpoints keep what was configured (IPAM config, aliases, links, driver options, gateway priority) but not what Docker assigned (IP and MAC addresses, endpoint and network IDs, DNS names), nor the old container's ID among the aliases. A MAC address set by hand is not kept either, since the inspect output cannot tell it from one Docker assigned.
+- A `com.docker.compose.image` label that holds the old image ID gets the new image ID. Compose recreates a container whose label differs from the image it would run, so a later `docker compose up -d` would otherwise recreate it once more.
 
 ## Notifications
 
@@ -155,20 +172,25 @@ Done when: unit tests pass against a fake registry for every auth type and media
 
 ### M3. Recreate and rollback
 
-- The seven steps above, the config builder (P1) and the comparison (P2).
-- The watch (P11) and rollback (R11).
-- With the containerd store, a local build gets a repo digest for its own name (M2). If that name also exists on a registry, M2 reports an update, and recreating would replace the local build with the registry's image. Decide how M3 tells such a container apart before it updates one.
-- Integration tests on Docker 24 and the current release:
+- The Docker client moves from `/v1.43` to each daemon's own API version (R3), and gains create, start, stop, rename, remove and image pull.
+- The seven steps above, the config builder (R22) and the comparison (R23).
+- The watch (R24) and rollback (R11).
+- `hikifune-agent update <container>` runs one update and prints the result as JSON.
+- The local build check in the registry check (R25). With the containerd store, a local build gets a repo digest for its own name (M2), so without it a local build whose name also exists on a registry would be reported as an update and replaced.
+- Integration tests on Docker 24 and the current release, against a registry inside each test daemon:
 
 | Case | Expected |
 | -- | -- |
 | Exec-form health check on an image without a shell | Healthy after the update |
-| Container on three networks | All three attached before start |
+| Container on three networks | All three attached before start, aliases kept, no old container ID among them |
 | New image that exits at once | Rolled back with the old name, networks and state |
+| New image whose health check fails | Rolled back |
 | Published ports | Old container stopped before the new one starts, no port conflict |
-| Named volumes and bind mounts | Same mounts after the update |
+| Named volumes, bind mounts and an anonymous volume | Same mounts after the update, data in the anonymous volume kept |
 | New image that changes an environment variable and its entrypoint | Change picked up, values set on the container kept |
-| Device requests | Same `DeviceRequests` JSON after the update |
+| Compose image label | Holds the new image ID |
+| Device requests | Same `DeviceRequests` JSON in the new container |
+| Container created with `--rm` | Refused before anything is stopped |
 
 Done when: every case passes on both Docker versions, and a real GPU container keeps its GPU after an update.
 
@@ -224,31 +246,14 @@ Done when: a week of scheduled runs with no failure left unexplained, and the ol
 | -- | -- | -- |
 | 1 | Repository layout | Decided: one repository, below |
 | 2 | How the server and agents connect | Which side dials the other, and how they authenticate (per-agent token or mTLS). tugtainer's server dialed its agents |
-| 3 | Rollback window | P11 proposes 2 minutes |
+| 3 | Rollback window | Decided: 2 minutes (R24) |
 | 4 | Web UI sign-in | OIDC in the app, or left to a reverse proxy |
 | 5 | Where the server keeps state | SQLite, or a JSON file trimmed to the last N runs |
 | 6 | What else `protected` turns off | R4 turns off automatic updates. Still open: whether a protected container is checked (so the UI shows an available update) and whether Update now is refused for it, as tugtainer did. The 17 containers that were check-only in tugtainer were all access paths (VPN, socket proxy, tunnel, agents) |
 | 7 | Credential helpers | Whether `credsStore` and `credHelpers` in `config.json` are supported, or only `auths`. M2 reads `auths` only; when a registry refuses an image whose credentials sit in a helper, the reason names the helper |
 | 8 | Image platforms | amd64 and arm64 |
 | 9 | Logo | Draft A (tow) is preferred, not final. The social preview drafts still say "opted in with compose labels", which no longer matches R4. Drafts are in [docs/logo](logo/) |
-| 10 | Recreate containers, or commit to Git and let the agent apply it | Decide before M3. See [GitOps option](#gitops-option) |
-
-### GitOps option
-
-The plan so far updates containers outside Git: the agent recreates a container from its inspect output (R9 to R14). The hosts this replaces keep their compose files in a Git repository, applied by hand, so an update by hikifune leaves Git behind the running state.
-
-The other way is to make hikifune work like Argo CD for compose:
-
-| | Recreate (current plan) | Commit and apply |
-| -- | -- | -- |
-| Update | The agent recreates the container from its inspect output | The server commits the new image digest or tag to the compose repository, and the agent pulls and runs `docker compose up -d` for the stacks that changed |
-| M3 | The hardest part: config copy, comparison, rename, watch, rollback | Mostly `docker compose`, plus the watch and a revert commit when the new container fails |
-| Rollback | Restore the renamed old container | Revert the commit and apply again |
-| Drift | Not seen | The agent compares running containers with the repository and reports or corrects the difference |
-| Needs | Nothing new | Image references pinned in the repository (no bare `latest`), write access to the repository, secrets kept out of Git (host `.env` files, or encrypted) |
-| Not covered | Nothing | Containers that are not in a compose file |
-
-M1 and M2 serve both ways. The choice changes M3 and M4, so it has to be made before M3.
+| 10 | Recreate containers, or commit to Git and let the agent apply it | Decided: recreate. The other way is under [Not doing](#not-doing) |
 
 ### Repository layout
 
@@ -260,7 +265,7 @@ hikifune/
   cmd/hikifune-agent/   agent
   internal/buildinfo/   the version both binaries carry
   internal/protocol/    messages both sides use
-  internal/docker/      Engine API client, pinned to API 1.43
+  internal/docker/      Engine API client, at each daemon's own API version (1.43 or newer)
   internal/registry/    digest checks and registry auth
   internal/labels/      hikifune.* label parsing
   deploy/compose/       .env.example, and later the install, dev and e2e compose files
