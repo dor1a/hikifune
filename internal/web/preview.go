@@ -2,6 +2,7 @@ package web
 
 import (
 	"html"
+	"regexp"
 	"html/template"
 	"net/http"
 	"slices"
@@ -111,6 +112,16 @@ func (s *Server) previewTemplate(w http.ResponseWriter, r *http.Request) {
 	d := s.settingsData(st)
 	d.Template, d.DefaultTemplate, d.Preview, d.PerHost = text, strings.TrimSpace(text) == "" || strings.TrimSpace(text) == strings.TrimSpace(notify.Default), p, perHost
 	s.render(w, http.StatusOK, "settings", s.newPage(r, st, "settings", "Settings", d))
+}
+
+// ruleRun is a line drawn with box-drawing characters, such as the rules
+// around each host's name. The preview's font draws them wider than
+// Discord's, so a rule that fits on one line in Discord would wrap here.
+var ruleRun = regexp.MustCompile(`[─━═]{10,}`)
+
+// rules keeps each rule in escaped text on one line, cut at the box's edge.
+func rules(escaped string) string {
+	return ruleRun.ReplaceAllString(escaped, `<span class="rule">$0</span>`)
 }
 
 // discordHTML renders the part of Discord's markdown a notification is
@@ -224,7 +235,7 @@ func discordHTML(s string) template.HTML {
 		t := toks[i]
 		switch t.kind {
 		case "text":
-			b.WriteString(html.EscapeString(t.val))
+			b.WriteString(rules(html.EscapeString(t.val)))
 		case "code":
 			b.WriteString("<code>" + html.EscapeString(t.val) + "</code>")
 		case "block":

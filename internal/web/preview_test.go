@@ -99,3 +99,14 @@ func TestTemplatePreview(t *testing.T) {
 		t.Errorf("settings page has no preview")
 	}
 }
+
+// A rule of box-drawing characters stays on one line in the preview; a few
+// of them, or other text, are left as they are.
+func TestRulesStayOnOneLine(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	got := string(discordHTML(rule + "\n🖥 **host-a**\n" + rule + "\n\n──── short"))
+	if strings.Count(got, `<span class="rule">`+rule+`</span>`) != 2 || strings.Contains(got, `<span class="rule">────</span>`) ||
+		!strings.Contains(got, "<strong>host-a</strong>") {
+		t.Errorf("rules: %s", got)
+	}
+}

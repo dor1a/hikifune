@@ -350,6 +350,7 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; bo
 .embed-body code { font: 0.85em/1.125rem Consolas, "Andale Mono WT", "Andale Mono", "Lucida Console", Monaco, monospace; background: #1e1f22; border: 1px solid #1e1f22; border-radius: 4px; padding: 0.1em 0.25em; }
 .embed-body pre { margin: 6px 0; padding: 7px; background: #1e1f22; border: 1px solid #1e1f22; border-radius: 4px; overflow-x: auto; }
 .embed-body pre code { border: 0; padding: 0; }
+.embed-body .rule { display: inline-block; max-width: 100%; overflow: hidden; white-space: nowrap; vertical-align: bottom; }
 .embed-foot { margin-top: 8px; color: #b5bac1; font-size: 12px; }
 #test-result .msg { margin: 0; }
 .settings .buttons { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
