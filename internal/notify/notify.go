@@ -729,14 +729,10 @@ var rule = strings.Repeat("─", 30)
 // added by the agent command are far shorter.
 const maxHeadName = 100
 
-// blankTop starts a shared embed's text with an empty line, which Discord
-// would trim if it were only a line break.
-const blankTop = "\u200b\n"
-
 // Shared lays out the hosts of one run as one embed, titled with the run and
 // colored by the worst host. Each host's part is its name between two rules, then
-// what the template writes for it, with an empty line above and below the
-// rules. Text longer than an embed takes goes on in more embeds with numbered
+// an empty line and what the template writes for it; an empty line parts the
+// hosts. The first rule starts right under the title. Text longer than an embed takes goes on in more embeds with numbered
 // titles, cut between hosts, and inside a host's text only when that host
 // alone is too long; each part of it then goes under the host's name, marked
 // continued after the first. A host the template writes nothing for is left out. A
@@ -750,7 +746,7 @@ func Shared(t *template.Template, msgs []Message) (out []Embed, fallbacks []erro
 	}
 	var chunks []chunk
 	var cur chunk
-	limit := MaxDescription - utf8.RuneCountInString(blankTop)
+	limit := MaxDescription
 	tone, kind, at := ToneQuiet, "", time.Time{}
 	for _, m := range msgs {
 		text, fallback, err := write(t, m)
@@ -819,7 +815,7 @@ func Shared(t *template.Template, msgs []Message) (out []Embed, fallbacks []erro
 		title = strings.ToUpper(kind[:1]) + kind[1:] + " run"
 	}
 	for i, c := range chunks {
-		e := Embed{Host: strings.Join(c.hosts, ", "), Title: title, Description: blankTop + c.text,
+		e := Embed{Host: strings.Join(c.hosts, ", "), Title: title, Description: c.text,
 			Color: toneColor(tone), Tone: tone, Footer: kind + " run", At: at}
 		if len(chunks) > 1 {
 			e.Title = fmt.Sprintf("%s (%d/%d)", title, i+1, len(chunks))

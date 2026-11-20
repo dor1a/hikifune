@@ -125,7 +125,6 @@ An update run's message with one host, as Discord shows it by default, bold and 
 
 ```
 Update run
-
 ──────────────────────────────
 🖥 host-a
 ──────────────────────────────
@@ -146,7 +145,7 @@ Total reclaimed space: 4.8 GB
 update run · 01:04
 ```
 
-Messages go under the hikifune name, colored by the worst result in them (red for rolled back, failed or left out, green for updated, blue for available), with the run and its time in the footer. By default a run is one message: an embed titled with the run, in which each host with something to say has its part, its name between two rules with an empty line above and below. Past what one embed takes it goes on in more, cut between hosts, and inside a host only when that host alone is too long; Discord takes at most 10 embeds and 6,000 characters to a message, so the rest goes in the next. Settings can give each host its own message instead, an embed titled with the host. The sample with every part, used by the preview and Send test, shows in the main color, Tokyo Night's blue. The template writes each host's text only. Text longer than an embed takes (4096 characters) goes in parts, cut at line ends, and a single line longer than that in the middle. Container names and other values are escaped and image references go in code spans, so Discord reads none of them as markdown, and the message pings no one. A rate limit is waited out as Discord asks, up to 5 minutes; a longer one fails the message, and so does one that would outlast the caller's deadline, such as Send test's minute. A server error is tried again, which could post a message twice if Discord took it before failing; Discord answers with the result, so this is rare.
+Messages go under the hikifune name, colored by the worst result in them (red for rolled back, failed or left out, green for updated, blue for available), with the run and its time in the footer. By default a run is one message: an embed titled with the run, in which each host with something to say has its part, its name between two rules, the first right under the title, and an empty line between one host and the next. Past what one embed takes it goes on in more, cut between hosts, and inside a host only when that host alone is too long; Discord takes at most 10 embeds and 6,000 characters to a message, so the rest goes in the next. Settings can give each host its own message instead, an embed titled with the host. The sample with every part, used by the preview and Send test, shows in the main color, Tokyo Night's blue. The template writes each host's text only. Text longer than an embed takes (4096 characters) goes in parts, cut at line ends, and a single line longer than that in the middle. Container names and other values are escaped and image references go in code spans, so Discord reads none of them as markdown, and the message pings no one. A rate limit is waited out as Discord asks, up to 5 minutes; a longer one fails the message, and so does one that would outlast the caller's deadline, such as Send test's minute. A server error is tried again, which could post a message twice if Discord took it before failing; Discord answers with the result, so this is rare.
 
 ## Milestones
 
