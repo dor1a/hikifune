@@ -126,9 +126,9 @@ An update run's message with one host, as Discord shows it by default, bold and 
 ```
 Update run
 
-──────────────────────────────
+────────────────────────────────────────
 🖥 host-a
-──────────────────────────────
+────────────────────────────────────────
 
 ✅ Updated:
 • monitoring-prometheus-1 docker.io/prom/prometheus:main

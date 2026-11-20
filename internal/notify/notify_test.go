@@ -327,7 +327,7 @@ func TestPost(t *testing.T) {
 	}
 	e := p.Embeds[0]
 	if e.Title != "Check run" || e.Color != colorAvailable || e.Footer == nil || e.Footer.Text != "check run" ||
-		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "\u200b\n"+strings.Repeat("─", 30)+"\n🖥 **a**\n"+strings.Repeat("─", 30)+"\n\n🆕 **Available:**\n• **web** `web:1`" {
+		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "\u200b\n"+strings.Repeat("─", 40)+"\n🖥 **a**\n"+strings.Repeat("─", 40)+"\n\n🆕 **Available:**\n• **web** `web:1`" {
 		t.Errorf("embed %+v", e)
 	}
 }
@@ -624,7 +624,7 @@ func TestARunSharesAMessage(t *testing.T) {
 		t.Fatalf("%d posts: %+v", len(f.bodies), f.bodies)
 	}
 	e := f.bodies[0].Embeds[0]
-	r := strings.Repeat("─", 30)
+	r := strings.Repeat("─", 40)
 	head := func(h string) string { return r + "\n🖥 **" + h + "**\n" + r + "\n\n" }
 	if e.Title != "Update run" || e.Color != colorBad || e.Footer.Text != "update run" ||
 		!strings.HasPrefix(e.Description, "\u200b\n"+head("a")+"✅ **Updated:**") ||
@@ -668,13 +668,13 @@ func TestASharedMessageGoesInParts(t *testing.T) {
 			t.Errorf("host %s heads %d parts", h, n)
 		}
 	}
-	if !strings.Contains(es[0].Description, "🖥 **b**") || !strings.HasPrefix(es[1].Description, "\u200b\n"+strings.Repeat("─", 30)+"\n🖥 **c**") ||
+	if !strings.Contains(es[0].Description, "🖥 **b**") || !strings.HasPrefix(es[1].Description, "\u200b\n"+strings.Repeat("─", 40)+"\n🖥 **c**") ||
 		es[0].Host != "a, b" || es[1].Host != "c" {
 		t.Errorf("a and b share the first part and c starts the second: %q, %q", es[0].Host, es[1].Host)
 	}
 	// A host too long for one embed goes on under its name, marked
 	// continued, and its name never ends a part without its text.
-	r := strings.Repeat("─", 30)
+	r := strings.Repeat("─", 40)
 	for _, size := range []int{4200, 10000} {
 		run := store.Run{Kind: "check", Started: t0, Hosts: []store.HostRun{{Agent: "node-a", Skipped: strings.Repeat("x", size)}}}
 		es, _, err := Shared(defaultTemplate(), Build(run))

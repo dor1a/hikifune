@@ -722,7 +722,7 @@ func write(t *template.Template, m Message) (text string, fallback, err error) {
 }
 
 // rule is the line above and below each host's name in a shared message.
-var rule = strings.Repeat("─", 30)
+var rule = strings.Repeat("─", 40)
 
 // maxHeadName bounds a host's name where it heads its part of a shared
 // message, so a name of any length leaves room for the text under it. Names

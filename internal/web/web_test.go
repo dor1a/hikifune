@@ -385,7 +385,7 @@ func TestNotificationSettings(t *testing.T) {
 	// By default the hosts of a run share a message, so the test sends two
 	// sample hosts in one embed, each under its name.
 	if len(posts) != 1 || strings.Count(posts[0], `"title"`) != 1 || !strings.Contains(posts[0], `"title":"Update run"`) ||
-		!strings.Contains(posts[0], `\n🖥 **example-host**\n`) || !strings.Contains(posts[0], `\n\ntest example-host\n\n──────────────────────────────\n🖥 **example-host-2**\n`) ||
+		!strings.Contains(posts[0], `\n🖥 **example-host**\n`) || !strings.Contains(posts[0], `\n\ntest example-host\n\n────────────────────────────────────────\n🖥 **example-host-2**\n`) ||
 		!strings.Contains(posts[0], `\n\ntest example-host-2"`) {
 		t.Errorf("posts %v", posts)
 	}
