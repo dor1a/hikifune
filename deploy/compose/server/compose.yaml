@@ -2,7 +2,7 @@ name: hikifune
 
 services:
   hikifune:
-    image: ghcr.io/dor1a/hikifune:0.1.3
+    image: ghcr.io/dor1a/hikifune:0.1.4
     restart: unless-stopped
     env_file:
       - .env
