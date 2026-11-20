@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/dor1a/hikifune/internal/auth"
@@ -68,4 +69,15 @@ func loadAuth(get func(key, def string) string) (*auth.Settings, error) {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// loadGravatar reads HIKIFUNE_GRAVATAR, which shows the signed-in user's
+// Gravatar in the sidebar.
+func loadGravatar(get func(key, def string) string) (bool, error) {
+	v := strings.TrimSpace(get("HIKIFUNE_GRAVATAR", "false"))
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("HIKIFUNE_GRAVATAR must be true or false, got %q", v)
+	}
+	return on, nil
 }

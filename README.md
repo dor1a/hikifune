@@ -20,7 +20,7 @@
 - A container is recreated from the configuration Docker reports for it, with only the image changed, so health checks, GPU requests, networks and mounts come back as they were. Defaults that came from the old image are dropped, so the new image's apply.
 - The old container is kept under another name until the new one has run for two minutes. With a health check, the new one must not turn unhealthy meanwhile (starting is fine) and must be healthy at the end. If not, it is rolled back, and that image digest is skipped at the next run.
 - After a host's updates, its dangling images (no tag, no container) are pruned: the old images the updates left, and any other dangling image on that host. The space freed is reported.
-- After each scheduled run, Discord gets what is available, updated, rolled back or failed on each host with something to say, with the reason for each rollback and failure, and the space the prune freed. By default a run's hosts share a message, an embed each in the color of its worst result, going on in the next message past Discord's 10 embeds or 6,000 characters; Settings can give each host its own message instead. A host with nothing to say is left out. The message template can be edited in the web UI, next to a preview.
+- After each scheduled run, Discord gets what is available, updated, rolled back or failed on each host with something to say, with the reason for each rollback and failure, and the space the prune freed. By default a run's hosts share one message: a single embed titled with the run, each host's part under its name between two rules, in the color of the worst result, going on in another embed past what one holds. Settings can give each host its own message instead, an embed titled with the host in the color of its worst result. A host with nothing to say is left out. The message template can be edited in the web UI, next to a preview.
 - Works with Docker 24 (Engine API 1.43) and newer, on amd64 and arm64.
 
 ## How it fits together
@@ -75,7 +75,7 @@ Then start it:
 docker compose up -d
 ```
 
-The web UI is on port 7777. With `oidc`, register `<HIKIFUNE_PUBLIC_URL>/oauth/callback` as the redirect URI at the provider; only members of `HIKIFUNE_OIDC_ALLOWED_GROUP` get in. The groups are read from the ID token, under the claim `HIKIFUNE_OIDC_GROUPS_CLAIM` (`groups` by default), and one of them must equal the group name exactly. Have the provider put the claim in the ID token, not only in the userinfo answer, and check the form of the names it sends: Keycloak's group mapper sends `/hikifune-users`, with a slash, unless its **Full group path** is off.
+The web UI is on port 7777. With `oidc`, register `<HIKIFUNE_PUBLIC_URL>/oauth/callback` as the redirect URI at the provider; only members of `HIKIFUNE_OIDC_ALLOWED_GROUP` get in. The groups are read from the ID token, under the claim `HIKIFUNE_OIDC_GROUPS_CLAIM` (`groups` by default), and one of them must equal the group name exactly. Have the provider put the claim in the ID token, not only in the userinfo answer, and check the form of the names it sends: Keycloak's group mapper sends `/hikifune-users`, with a slash, unless its **Full group path** is off. The sidebar shows who is signed in, with their Gravatar when `HIKIFUNE_GRAVATAR=true`.
 
 ### 2. An agent on each host
 
@@ -170,6 +170,7 @@ Every key is in the `.env.example` files. The schedule set in the web UI, once s
 | `HIKIFUNE_OIDC_GROUPS_CLAIM` | `groups` | Claim of the ID token that lists the user's groups |
 | `HIKIFUNE_OIDC_SCOPES` | `openid profile email` | Scopes asked for; must include `openid` |
 | `HIKIFUNE_SESSION_KEY` | | With `oidc`: at least 32 random bytes, such as the output of `openssl rand -hex 32` |
+| `HIKIFUNE_GRAVATAR` | `false` | With `oidc`: `true` shows the signed-in user's Gravatar in the sidebar, found by a SHA-256 hash of the email in the ID token. Browsers then load it from gravatar.com |
 
 ### Agent
 

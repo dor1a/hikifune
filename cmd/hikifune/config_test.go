@@ -53,6 +53,21 @@ func TestLoadAuth(t *testing.T) {
 	}
 }
 
+func TestLoadGravatar(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "false": false, "true": true, " TRUE ": true, "1": true, "0": false} {
+		m := map[string]string{}
+		if v != "" {
+			m["HIKIFUNE_GRAVATAR"] = v
+		}
+		if got, err := loadGravatar(getter(m)); err != nil || got != want {
+			t.Errorf("%q: %v, %v", v, got, err)
+		}
+	}
+	if _, err := loadGravatar(getter(map[string]string{"HIKIFUNE_GRAVATAR": "yes"})); err == nil || !strings.Contains(err.Error(), `got "yes"`) {
+		t.Errorf("yes: %v", err)
+	}
+}
+
 func TestAgentName(t *testing.T) {
 	for _, ok := range []string{"atsui", "nas-1", "rack.a_2", strings.Repeat("a", 63)} {
 		if !agentName.MatchString(ok) {

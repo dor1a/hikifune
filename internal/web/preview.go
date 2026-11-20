@@ -49,30 +49,29 @@ func (s *Server) preview(text string, sample int, perHost bool) templatePreview 
 		p.Error = err.Error()
 		return p
 	}
-	msgs := []notify.Message{kinds[sample].Message}
-	if !perHost {
-		msgs = notify.SampleRun(msgs[0])
+	first := kinds[sample].Message
+	embeds, fallback, err := notify.Embeds(t, first)
+	if err != nil {
+		p.Error = err.Error()
+		return p
 	}
-	var all []notify.Embed
-	for i, m := range msgs {
-		embeds, fallback, err := notify.Embeds(t, m)
-		if err != nil {
-			p.Error = err.Error()
-			return p
+	p.Nothing = len(embeds) == 0
+	if fallback != nil {
+		p.Fallback = first.Host + ": " + fallback.Error()
+	}
+	if perHost {
+		for _, e := range embeds {
+			p.Messages = append(p.Messages, []previewEmbed{s.previewEmbed(e)})
 		}
-		if i == 0 {
-			p.Nothing = len(embeds) == 0
-		}
-		if fallback != nil && p.Fallback == "" {
-			p.Fallback = m.Host + ": " + fallback.Error()
-		}
-		if perHost && len(embeds) > 0 {
-			for _, e := range embeds {
-				p.Messages = append(p.Messages, []previewEmbed{s.previewEmbed(e)})
-			}
-			continue
-		}
-		all = append(all, embeds...)
+		return p
+	}
+	all, fallbacks, err := notify.Shared(t, notify.SampleRun(first))
+	if err != nil {
+		p.Error = err.Error()
+		return p
+	}
+	if p.Fallback == "" && len(fallbacks) > 0 {
+		p.Fallback = fallbacks[0].Error()
 	}
 	for _, batch := range notify.Pack(all) {
 		var msg []previewEmbed

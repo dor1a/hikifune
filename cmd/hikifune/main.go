@@ -191,6 +191,10 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	gravatar, err := loadGravatar(env)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -199,7 +203,7 @@ func serve() error {
 	cfg := web.Config{Store: r.Store, Runner: r, Schedule: sched, Wake: sched.Wake, Location: loc,
 		DefaultCheck:  server.When{Every: checkEvery, At: checkAt},
 		DefaultUpdate: server.When{Every: updateEvery, At: updateAt},
-		Watch:         r.Watch, Version: buildinfo.Version, Notifier: n,
+		Watch:         r.Watch, Version: buildinfo.Version, Notifier: n, Gravatar: gravatar,
 		Base: ctx, Log: slog.Default(),
 		Status: func(ctx context.Context, a store.Agent) (protocol.Version, error) {
 			c, err := server.NewClient(a.URL, a.Token)

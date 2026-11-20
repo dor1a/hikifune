@@ -1,7 +1,9 @@
-// Package notify sends run results to a Discord webhook (R17 to R19). Each
-// host gets one message built from the run record (R31): an embed titled with
-// the host, colored by the worst result, whose description comes from a
-// template the web UI can edit. A host with nothing to say gets no message.
+// Package notify sends run results to a Discord webhook (R17 to R19). The
+// messages are built from the run record (R31): by default one for the run,
+// an embed with every host under its name, or, set per host, one for each
+// host, an embed titled with the host. Either is colored by the worst result
+// in it, and a template the web UI can edit writes each host's text. A host
+// with nothing to say is left out.
 package notify
 
 import (
@@ -52,6 +54,9 @@ type Message struct {
 	// Note is an error that came after the containers were listed, such as
 	// a failed prune.
 	Note string
+	// sample marks Sample, the message with every part: it shows in the
+	// main color, not in the color of its worst result.
+	sample bool
 }
 
 // Empty tells whether the message has nothing to say.
@@ -60,24 +65,34 @@ func (m Message) Empty() bool {
 		len(m.Available)+len(m.Updated)+len(m.RolledBack)+len(m.Failed) == 0
 }
 
-// Embed colors, the web UI's error, done and accent colors.
+// Embed colors, the web UI's error, done and accent colors, and the main
+// color, the dark theme's accent: Tokyo Night's blue.
 const (
 	colorBad       = 0xC64343
 	colorUpdated   = 0x2F7A4F
 	colorAvailable = 0x2E7DE9
 	colorQuiet     = 0x5B6283
+	colorMain      = 0x7AA2F7
 )
 
 // Tones of a message, the worst result in it, which picks its color.
+// ToneMain is the sample with every part's, which is no result.
 const (
 	ToneBad       = "bad"
 	ToneUpdated   = "updated"
 	ToneAvailable = "available"
 	ToneQuiet     = "quiet"
+	ToneMain      = "main"
 )
+
+// toneRank orders the tones from the mildest, so a shared message takes the
+// worst of its hosts. The sample with every part outranks them all.
+var toneRank = map[string]int{ToneQuiet: 0, ToneAvailable: 1, ToneUpdated: 2, ToneBad: 3, ToneMain: 4}
 
 func (m Message) tone() string {
 	switch {
+	case m.sample:
+		return ToneMain
 	case m.LeftOut != "" || m.Note != "" || len(m.RolledBack) > 0 || len(m.Failed) > 0:
 		return ToneBad
 	case len(m.Updated) > 0:
@@ -88,8 +103,12 @@ func (m Message) tone() string {
 	return ToneQuiet
 }
 
-func (m Message) color() int {
-	switch m.tone() {
+func (m Message) color() int { return toneColor(m.tone()) }
+
+func toneColor(tone string) int {
+	switch tone {
+	case ToneMain:
+		return colorMain
 	case ToneBad:
 		return colorBad
 	case ToneUpdated:
@@ -507,7 +526,8 @@ func Escape(s string) string {
 // for Send test.
 func Sample() Message {
 	return Message{
-		Host: "example-host", Kind: "update", At: time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC),
+		sample: true,
+		Host:   "example-host", Kind: "update", At: time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC),
 		Available: []Item{{Container: "monitoring-grafana-1", Image: "grafana/grafana:latest", Protected: true}},
 		Updated:   []Item{{Container: "monitoring-prometheus-1", Image: "docker.io/prom/prometheus:main"}},
 		RolledBack: []Item{{Container: "apps-web-1", Image: "ghcr.io/example/web:latest",
@@ -586,6 +606,11 @@ const MaxDescription = 4096
 // it can. A line cut in the middle is never cut between a backslash and the
 // mark it escapes.
 func split(text string, limit int) []string {
+	return splitEach(text, func(int) int { return limit })
+}
+
+// splitEach is split with a limit for each part, by its number from 0.
+func splitEach(text string, limitOf func(part int) int) []string {
 	var parts []string
 	var cur strings.Builder
 	n := 0
@@ -598,12 +623,12 @@ func split(text string, limit int) []string {
 	}
 	for _, line := range strings.SplitAfter(text, "\n") {
 		l := utf8.RuneCountInString(line)
-		if n+l > limit {
+		if n+l > limitOf(len(parts)) {
 			flush()
 		}
-		for l > limit {
+		for l > limitOf(len(parts)) {
 			r := []rune(line)
-			cut := limit
+			cut := limitOf(len(parts))
 			slashes := 0
 			for k := cut - 1; k >= 0 && r[k] == '\\'; k-- {
 				slashes++
@@ -627,7 +652,7 @@ type Notifier struct {
 	// Template gives the template in force; empty means Default.
 	Template func() string
 	// PerHost, when set and true, gives each host its own message. Otherwise
-	// the hosts of a run share messages, an embed each.
+	// the hosts of a run share one, as Shared lays it out.
 	PerHost func() bool
 	Log     *slog.Logger
 }
@@ -669,11 +694,7 @@ func (e Embed) wire() embed {
 // to say, the default template writes it, and fallback says why. No embeds
 // and no error mean nothing is sent.
 func Embeds(t *template.Template, m Message) (out []Embed, fallback, err error) {
-	text, err := Render(t, m)
-	if (err != nil || text == "") && !m.Empty() && t != defaultTemplate() {
-		fallback = cmp.Or(err, errors.New("it wrote nothing"))
-		text, err = Render(defaultTemplate(), m)
-	}
+	text, fallback, err := write(t, m)
 	if err != nil || text == "" {
 		return nil, fallback, err
 	}
@@ -687,6 +708,125 @@ func Embeds(t *template.Template, m Message) (out []Embed, fallback, err error) 
 			Footer: m.Kind + " run", At: m.At})
 	}
 	return out, fallback, nil
+}
+
+// write renders m with t, or with the default template when t fails on m or
+// writes nothing for a message with something to say; fallback says why.
+func write(t *template.Template, m Message) (text string, fallback, err error) {
+	text, err = Render(t, m)
+	if (err != nil || text == "") && !m.Empty() && t != defaultTemplate() {
+		fallback = cmp.Or(err, errors.New("it wrote nothing"))
+		text, err = Render(defaultTemplate(), m)
+	}
+	return text, fallback, err
+}
+
+// rule is the line above and below each host's name in a shared message.
+var rule = strings.Repeat("─", 30)
+
+// maxHeadName bounds a host's name where it heads its part of a shared
+// message, so a name of any length leaves room for the text under it. Names
+// added by the agent command are far shorter.
+const maxHeadName = 100
+
+// blankTop starts a shared embed's text with an empty line, which Discord
+// would trim if it were only a line break.
+const blankTop = "\u200b\n"
+
+// Shared lays out the hosts of one run as one embed, titled with the run and
+// colored by the worst host. Each host's part is its name between two rules, then
+// what the template writes for it, with an empty line above and below the
+// rules. Text longer than an embed takes goes on in more embeds with numbered
+// titles, cut between hosts, and inside a host's text only when that host
+// alone is too long; each part of it then goes under the host's name, marked
+// continued after the first. A host the template writes nothing for is left out. A
+// host whose part cannot be written is left out too and named in err;
+// fallbacks name the hosts the default template wrote, and why.
+func Shared(t *template.Template, msgs []Message) (out []Embed, fallbacks []error, err error) {
+	var errs []error
+	type chunk struct {
+		text  string
+		hosts []string
+	}
+	var chunks []chunk
+	var cur chunk
+	limit := MaxDescription - utf8.RuneCountInString(blankTop)
+	tone, kind, at := ToneQuiet, "", time.Time{}
+	for _, m := range msgs {
+		text, fallback, err := write(t, m)
+		if fallback != nil {
+			fallbacks = append(fallbacks, fmt.Errorf("%s: %w", m.Host, fallback))
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.Host, err))
+			continue
+		}
+		if text == "" {
+			continue
+		}
+		if kind == "" {
+			kind, at = m.Kind, m.At
+		}
+		if toneRank[m.tone()] > toneRank[tone] {
+			tone = m.tone()
+		}
+		name := m.Host
+		if r := []rune(name); len(r) > maxHeadName {
+			name = string(r[:maxHeadName]) + "…"
+		}
+		head := func(more string) string {
+			return rule + "\n🖥 **" + Escape(name) + "**" + more + "\n" + rule + "\n\n"
+		}
+		pieces := []string{head("") + text}
+		if utf8.RuneCountInString(pieces[0]) > limit {
+			// The text goes on in more parts, each under the host's name, so
+			// a part read alone still says whose it is, and the name never
+			// ends a part without the text it heads.
+			first, cont := head(""), head(" (continued)")
+			pieces = nil
+			for i, b := range splitEach(text, func(part int) int {
+				if part == 0 {
+					return limit - utf8.RuneCountInString(first)
+				}
+				return limit - utf8.RuneCountInString(cont)
+			}) {
+				if i == 0 {
+					pieces = append(pieces, first+b)
+				} else {
+					pieces = append(pieces, cont+b)
+				}
+			}
+		}
+		for _, p := range pieces {
+			if cur.text != "" && utf8.RuneCountInString(cur.text)+2+utf8.RuneCountInString(p) > limit {
+				chunks = append(chunks, cur)
+				cur = chunk{}
+			}
+			if cur.text != "" {
+				cur.text += "\n\n"
+			}
+			cur.text += p
+			if !slices.Contains(cur.hosts, m.Host) {
+				cur.hosts = append(cur.hosts, m.Host)
+			}
+		}
+	}
+	if cur.text != "" {
+		chunks = append(chunks, cur)
+	}
+	title := ""
+	if kind != "" {
+		title = strings.ToUpper(kind[:1]) + kind[1:] + " run"
+	}
+	for i, c := range chunks {
+		e := Embed{Host: strings.Join(c.hosts, ", "), Title: title, Description: blankTop + c.text,
+			Color: toneColor(tone), Tone: tone, Footer: kind + " run", At: at}
+		if len(chunks) > 1 {
+			e.Title = fmt.Sprintf("%s (%d/%d)", title, i+1, len(chunks))
+		}
+		out = append(out, e)
+	}
+	return out, fallbacks, errors.Join(errs...)
 }
 
 // Discord's limits on one message: how many embeds, and how many characters
@@ -719,22 +859,28 @@ func Pack(es []Embed) [][]Embed {
 }
 
 // Deliver posts msgs: each host its own message, in parts when long, when
-// perHost; otherwise all of them in as few messages as Pack makes, an embed
-// for each host. A host whose message fails to post is named in the error.
+// perHost; otherwise one message with every host, as Shared lays it out, and
+// more only past what Discord takes in one (see Pack). A host whose message
+// fails to post is named in the error.
 func (n *Notifier) Deliver(ctx context.Context, t *template.Template, msgs []Message, perHost bool) error {
 	var errs []error
-	var shared []Embed
+	if !perHost {
+		shared, fallbacks, err := Shared(t, msgs)
+		for _, f := range fallbacks {
+			n.logError("the notification template failed on a message; using the default", f)
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+		return errors.Join(append(errs, n.postShared(ctx, shared))...)
+	}
 	for _, m := range msgs {
 		es, fallback, err := Embeds(t, m)
 		if fallback != nil {
-			n.logError("the notification template failed on a message; using the default", fallback)
+			n.logError("the notification template failed on a message; using the default", fmt.Errorf("%s: %w", m.Host, fallback))
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", m.Host, err))
-			continue
-		}
-		if !perHost {
-			shared = append(shared, es...)
 			continue
 		}
 		for _, e := range es {
@@ -744,13 +890,22 @@ func (n *Notifier) Deliver(ctx context.Context, t *template.Template, msgs []Mes
 			}
 		}
 	}
+	return errors.Join(errs...)
+}
+
+// postShared posts the embeds of a shared message, as few to a post as
+// Discord takes.
+func (n *Notifier) postShared(ctx context.Context, shared []Embed) error {
+	var errs []error
 	for _, batch := range Pack(shared) {
 		var wire []embed
 		var hosts []string
 		for _, e := range batch {
 			wire = append(wire, e.wire())
-			if !slices.Contains(hosts, e.Host) {
-				hosts = append(hosts, e.Host)
+			for h := range strings.SplitSeq(e.Host, ", ") {
+				if !slices.Contains(hosts, h) {
+					hosts = append(hosts, h)
+				}
 			}
 		}
 		if err := n.Discord.PostAll(ctx, wire); err != nil {

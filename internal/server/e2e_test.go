@@ -65,8 +65,11 @@ func TestE2EServer(t *testing.T) {
 	hook := &webhook{}
 	hookSrv := httptest.NewServer(hook)
 	defer hookSrv.Close()
-	tpl := ""
-	n := &notify.Notifier{Discord: &notify.Discord{URL: hookSrv.URL + "/api/webhooks/1/e2e"}, Template: func() string { return tpl }}
+	// The runs before the last give each host its own message, to look at
+	// each host's text; the last shares one, as by default.
+	tpl, perHost := "", true
+	n := &notify.Notifier{Discord: &notify.Discord{URL: hookSrv.URL + "/api/webhooks/1/e2e"}, Template: func() string { return tpl },
+		PerHost: func() bool { return perHost }}
 	r.Notify = func(ctx context.Context, run store.Run) {
 		if err := n.Run(ctx, run); err != nil {
 			t.Errorf("notify %s run: %v", run.Kind, err)
@@ -178,13 +181,19 @@ func TestE2EServer(t *testing.T) {
 	// Nothing was updated, rolled back or failed: no message.
 	hook.take(t, 0)
 
-	tpl = "edited {{.Kind}} run on {{.Host}}: {{len .Available}} available"
+	tpl, perHost = "edited {{.Kind}} run on {{.Host}}: {{len .Available}} available", false
 	if _, err := r.Run(ctx, KindCheck); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range hook.take(t, len(hosts)) {
-		if !strings.HasPrefix(e.Description, "edited check run on "+e.Title+": ") {
-			t.Errorf("edited template not used: %q", e.Description)
+	for _, e := range hook.take(t, 1) {
+		if e.Title != "Check run" {
+			t.Errorf("shared message titled %q", e.Title)
+		}
+		for _, h := range hosts {
+			name := strings.TrimPrefix(h, "tcp://")
+			if !strings.Contains(e.Description, "🖥 **"+name+"**") || !strings.Contains(e.Description, "edited check run on "+name+": ") {
+				t.Errorf("shared message has no part for %s, or not the edited template:\n%s", name, e.Description)
+			}
 		}
 	}
 	if state, _ := st.Read(); len(state.Runs) != 4 {

@@ -11,6 +11,7 @@
 <script src="{{asset "mode.js"}}"></script>
 <script src="{{asset "htmx.min.js"}}" defer></script>
 <script src="{{asset "schedule.js"}}" defer></script>
+<script src="{{asset "flash.js"}}" defer></script>
 </head>
 <body>
 {{if eq .Page "notice"}}
@@ -35,7 +36,7 @@
   </nav>{{end}}
   <div class="side-foot">
     {{with .User}}<div class="account">
-      <span class="who" title="Signed in as {{.Name}}">{{.Name}}</span>
+      <span class="who" title="Signed in as {{.Name}}"><span class="face" aria-hidden="true">{{$.Initial}}{{with $.Avatar}}<img src="{{.}}" alt="" width="28" height="28">{{end}}</span><span class="name">{{.Name}}</span></span>
       <a class="icon-btn" href="{{.LogoutURL}}" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10"/></svg></a>
     </div>{{end}}
     <span class="muted small">hikifune {{.Version}}</span>
@@ -88,26 +89,26 @@
 {{- end}}
 
 {{define "ctable" -}}
-<table class="list">
-  <thead><tr><th>Container</th>{{if .Host}}<th>Host</th>{{end}}<th>Status</th><th class="reason">Reason</th><th>Checked</th><th></th></tr></thead>
+<div class="table-scroll"><table class="list ctable">
+  <thead><tr><th class="c-name">Container</th>{{if .Host}}<th class="c-host">Host</th>{{end}}<th class="c-status">Status</th><th class="reason">Reason</th><th class="c-checked">Checked</th><th class="c-act"></th></tr></thead>
   <tbody>
   {{range .Rows}}
   <tr>
     <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag" title="hikifune.protected: checked, never updated on schedule">Protected</span>{{end}}{{if .Self}} <span class="tag">hikifune</span>{{end}}</div>
       <div class="sub">{{.Image}}{{with .State}}{{if ne . "running"}} · {{.}}{{end}}{{end}}</div></td>
-    {{if $.Host}}<td><a href="/hosts/{{seg .Host}}">{{.Host}}</a></td>{{end}}
+    {{if $.Host}}<td class="host"><a href="/hosts/{{seg .Host}}">{{.Host}}</a></td>{{end}}
     <td>{{template "badge" .Status}}{{if and .Pending (ne .Status "update_available")}} <span class="badge available" title="The check found a newer digest that is not on the container">Update available</span>{{end}}</td>
     <td class="reason">{{.Reason}}</td>
     <td class="muted" title="{{local .At}}">{{ago .At}}</td>
     <td class="act">{{if .CanUpdate}}<form hx-post="/actions/update" hx-target="#activity" hx-swap="outerHTML"{{if .Protected}} hx-confirm="{{.Container}} is protected, so it is never updated on schedule. Update it now anyway?"{{end}}>
       <input type="hidden" name="host" value="{{.Host}}"><input type="hidden" name="container" value="{{.Container}}"><input type="hidden" name="id" value="{{.ID}}">
-      <button type="submit" class="small">Update now</button></form>{{end}}</td>
+      <button type="submit" class="small primary">Update now</button></form>{{end}}</td>
   </tr>
   {{else}}
   <tr><td colspan="{{if .Host}}6{{else}}5{{end}}" class="empty">No container matches.</td></tr>
   {{end}}
   </tbody>
-</table>
+</table></div>
 {{- end}}
 
 {{define "containers" -}}
@@ -175,11 +176,11 @@
 {{template "top" .}}
 <h1 class="title">Hosts</h1>
 {{with .Data}}
-{{with .Saved}}<p class="msg">Saved for {{.}}.</p>{{end}}
+{{with .Saved}}<p class="msg flash" role="status">Saved for {{.}}.</p>{{end}}
 {{if not .Hosts}}
 <div class="card empty">No agents yet. Add one on the server with <code>hikifune agent add &lt;name&gt; &lt;url&gt;</code>.</div>
 {{else}}
-<table class="list">
+<div class="table-scroll"><table class="list">
   <thead><tr><th>Host</th><th>Now</th><th>Last run</th><th>Updates</th><th></th></tr></thead>
   <tbody>
   {{range .Hosts}}
@@ -187,15 +188,15 @@
     <td><div class="name"><a href="/hosts/{{seg .Agent.Name}}">{{.Agent.Name}}</a></div><div class="sub">{{.Agent.URL}}</div></td>
     <td hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">Asking…</span></td>
     <td>{{if .Issue}}<span class="msg bad">{{.Issue}}</span> <span class="muted">{{ago .IssueAt}}</span>{{else if .AsOf.IsZero}}<span class="muted">Never</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{ago .AsOf}}</span>{{end}}</td>
-    <td><form method="post" action="/hosts/{{seg .Agent.Name}}/check-only">
-      {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag warn">Check only</span> <button type="submit" class="link">Turn updates on</button>
-      {{else}}<input type="hidden" name="on" value="1"><span class="muted">On schedule</span> <button type="submit" class="link">Check only</button>{{end}}
+    <td><form class="stack" method="post" action="/hosts/{{seg .Agent.Name}}/check-only">
+      {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag warn">Check only</span> <button type="submit" class="pill">Turn updates on</button>
+      {{else}}<input type="hidden" name="on" value="1"><span class="muted">On schedule</span> <button type="submit" class="pill">Check only</button>{{end}}
     </form></td>
     <td class="act"><form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML"><input type="hidden" name="host" value="{{.Agent.Name}}"><button type="submit" class="small">Check now</button></form></td>
   </tr>
   {{end}}
   </tbody>
-</table>
+</table></div>
 <p class="muted small">A check-only host is checked on schedule but never updated then. Update now still works on it.</p>
 {{end}}
 {{end}}
@@ -209,13 +210,13 @@
   <h1 class="title">{{.Agent.Name}} <span class="muted">{{.Agent.URL}}</span></h1>
   <form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML"><input type="hidden" name="host" value="{{.Agent.Name}}"><button type="submit" class="small">Check this host</button></form>
 </div>
-{{if $.Data.Saved}}<p class="msg">Saved.</p>{{end}}
 <dl class="card facts">
   <div><dt>Now</dt><dd hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">Asking…</span></dd></div>
   <div><dt>Container list</dt><dd>{{if .AsOf.IsZero}}<span class="muted">None yet</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{local .AsOf}}, {{ago .AsOf}}</span>{{end}}</dd></div>
   <div><dt>Schedule</dt><dd><form method="post" action="/hosts/{{seg .Agent.Name}}/check-only"><input type="hidden" name="back" value="host">
-    {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag warn">Check only</span> Checked on schedule, never updated then <button type="submit" class="link">Turn updates on</button>
-    {{else}}<input type="hidden" name="on" value="1">Checked and updated on schedule <button type="submit" class="link">Check only</button>{{end}}
+    {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag warn">Check only</span> Checked on schedule, never updated then <button type="submit" class="pill">Turn updates on</button>
+    {{else}}<input type="hidden" name="on" value="1">Checked and updated on schedule <button type="submit" class="pill">Check only</button>{{end}}
+    {{if $.Data.Saved}}<span class="msg flash" role="status">Saved.</span>{{end}}
   </form></dd></div>
 </dl>
 {{if .Issue}}<p class="msg bad">{{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}
@@ -261,10 +262,10 @@
     <noscript><p><a href="/home/map?layout={{.Layout}}">Show the map</a>. Without JavaScript it does not refresh by itself.</p></noscript>{{end}}</div>
 </section>
 <h2 class="section-title">Recent runs <a class="small" href="/runs">All runs</a></h2>
-<table class="list">
+<div class="table-scroll"><table class="list">
   <thead><tr><th>Started</th><th>Run</th><th>Results</th><th>Took</th></tr></thead>
   <tbody>{{template "runrows" .Recent}}</tbody>
-</table>
+</table></div>
 {{end}}
 {{template "bottom" .}}
 {{- end}}
@@ -315,10 +316,10 @@
 {{define "runs" -}}
 {{template "top" .}}
 <h1 class="title">Runs</h1>
-<table class="list">
+<div class="table-scroll"><table class="list">
   <thead><tr><th>Started</th><th>Run</th><th>Results</th><th>Took</th></tr></thead>
   <tbody>{{template "runrows" .Data}}</tbody>
-</table>
+</table></div>
 {{template "bottom" .}}
 {{- end}}
 
@@ -332,8 +333,8 @@
   {{with .Skipped}}<p class="msg bad">Left out: {{.}}</p>{{end}}
   {{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
   {{if .Containers}}
-  <table class="list">
-    <thead><tr><th>Container</th><th>Status</th><th>Reason</th><th>Digest</th></tr></thead>
+  <div class="table-scroll"><table class="list ctable">
+    <thead><tr><th class="c-name">Container</th><th class="c-status">Status</th><th class="reason">Reason</th><th class="c-digest">Digest</th></tr></thead>
     <tbody>
     {{range .Containers}}
     <tr>
@@ -344,7 +345,7 @@
     </tr>
     {{end}}
     </tbody>
-  </table>
+  </table></div>
   {{end}}
 </section>
 {{end}}
@@ -376,7 +377,6 @@
 {{template "top" .}}
 <h1 class="title">Settings</h1>
 {{with .Data}}
-{{if .Done}}<p class="msg">Saved. The schedule uses the new times now.</p>{{end}}
 {{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
 <form class="card settings" method="post" action="/settings">
   <h2>Schedule</h2>
@@ -387,10 +387,10 @@
   <div class="buttons">
     <button type="submit" class="primary">Save</button>
     {{if .Saved}}<button type="submit" name="reset" value="1" class="link" formnovalidate>Use the environment's schedule</button>{{end}}
+    {{if .Done}}<span class="msg flash" role="status">Saved. The schedule uses the new times now.</span>{{end}}
   </div>
 </form>
 
-{{if .TemplateDone}}<p class="msg">Saved. The next notification uses this template.</p>{{end}}
 {{with .TemplateError}}<p class="msg bad">The template was not saved: {{.}}</p>{{end}}
 <form class="card settings notify" method="post" action="/settings/template">
   <h2>Notifications</h2>
@@ -399,8 +399,8 @@
     <div><dt>Avatar</dt><dd class="muted">{{if .Avatar}}From HIKIFUNE_DISCORD_AVATAR_URL{{else}}The one set on the webhook in Discord{{end}}</dd></div>
     <div><dt>Sent</dt><dd class="muted">After the scheduled runs, for each host with something to say</dd></div>
     <div><dt><label for="messages">Messages</label></dt><dd><select id="messages" name="messages" hx-post="/settings/template/preview" hx-trigger="change" hx-target="#template-preview" hx-swap="innerHTML">
-      <option value="run"{{if not .PerHost}} selected{{end}}>One per run, an embed for each host</option>
-      <option value="host"{{if .PerHost}} selected{{end}}>One per host</option>
+      <option value="run"{{if not .PerHost}} selected{{end}}>One message with every host</option>
+      <option value="host"{{if .PerHost}} selected{{end}}>A message for each host</option>
     </select></dd></div>
   </dl>
   <div class="template-grid">
@@ -422,11 +422,12 @@
   <div id="template-preview" role="status">{{template "previewbody" $p}}</div>
   </div>
   </div>
-  <p class="muted small">Go text/template for the embed text; the title is the host. Fields: <code>.Host</code>, <code>.Kind</code>, <code>.At</code>, <code>.LeftOut</code>, <code>.Available</code>, <code>.Updated</code>, <code>.RolledBack</code>, <code>.Failed</code> (each item has <code>.Container</code>, <code>.Image</code>, <code>.Reason</code>, <code>.Protected</code>, <code>.Self</code>), <code>.Reclaimed</code>, <code>.Note</code>. <code>md</code> escapes Discord markdown.</p>
+  <p class="muted small">Go text/template for each host's text. With every host in one message, each host's text goes under its name and the title is the run; with a message for each host, the title is the host. Fields: <code>.Host</code>, <code>.Kind</code>, <code>.At</code>, <code>.LeftOut</code>, <code>.Available</code>, <code>.Updated</code>, <code>.RolledBack</code>, <code>.Failed</code> (each item has <code>.Container</code>, <code>.Image</code>, <code>.Reason</code>, <code>.Protected</code>, <code>.Self</code>), <code>.Reclaimed</code>, <code>.Note</code>. <code>md</code> escapes Discord markdown.</p>
   <div class="buttons">
     <button type="submit" class="primary">Save</button>
     <button type="button" hx-post="/settings/template/test" hx-target="#test-result" hx-swap="innerHTML">Send test</button>
     {{if not .DefaultTemplate}}<button type="submit" name="reset" value="1" class="link">Use the default</button>{{end}}
+    {{if .TemplateDone}}<span class="msg flash" role="status">Saved. The next notification uses this template.</span>{{end}}
     <span id="test-result" role="status"></span>
   </div>
 </form>

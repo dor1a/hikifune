@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -325,8 +326,8 @@ func TestPost(t *testing.T) {
 		t.Fatalf("payload %+v, query %q", p, f.queries[2])
 	}
 	e := p.Embeds[0]
-	if e.Title != "a" || e.Color != colorAvailable || e.Footer == nil || e.Footer.Text != "check run" ||
-		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "🆕 **Available:**\n• **web** `web:1`" {
+	if e.Title != "Check run" || e.Color != colorAvailable || e.Footer == nil || e.Footer.Text != "check run" ||
+		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "\u200b\n"+strings.Repeat("─", 30)+"\n🖥 **a**\n"+strings.Repeat("─", 30)+"\n\n🆕 **Available:**\n• **web** `web:1`" {
 		t.Errorf("embed %+v", e)
 	}
 }
@@ -473,12 +474,27 @@ func TestATemplateThatFailsOnAMessage(t *testing.T) {
 	}
 }
 
+// The log names the host the default template wrote, in either grouping.
+func TestAFallbackIsLoggedWithItsHost(t *testing.T) {
+	f := &fakeDiscord{}
+	d, _ := newDiscord(t, f)
+	run := store.Run{Kind: "check", Hosts: []store.HostRun{{Agent: "old", Skipped: "the agent runs v0"}}}
+	for _, perHost := range []bool{false, true} {
+		var b strings.Builder
+		n := &Notifier{Discord: d, Template: func() string { return "{{range .Available}}{{.Container}}{{end}}" },
+			PerHost: func() bool { return perHost }, Log: slog.New(slog.NewTextHandler(&b, nil))}
+		if err := n.Run(context.Background(), run); err != nil || !strings.Contains(b.String(), "old: it wrote nothing") {
+			t.Errorf("per host %v: %v, log %q", perHost, err, b.String())
+		}
+	}
+}
+
 func TestAnEditedTemplateIsUsed(t *testing.T) {
 	f := &fakeDiscord{}
 	d, _ := newDiscord(t, f)
 	n := &Notifier{Discord: d, Template: func() string { return "{{.Kind}} on {{.Host}}: {{len .Available}} new" }}
 	run := store.Run{Kind: "check", Hosts: []store.HostRun{{Agent: "a", Containers: []store.Entry{entry("web", "update_available", true)}}}}
-	if err := n.Run(context.Background(), run); err != nil || f.bodies[0].Embeds[0].Description != "check on a: 1 new" {
+	if err := n.Run(context.Background(), run); err != nil || !strings.HasSuffix(f.bodies[0].Embeds[0].Description, "\n\ncheck on a: 1 new") {
 		t.Fatalf("err %v, posts %+v", err, f.bodies)
 	}
 }
@@ -536,7 +552,7 @@ func TestEmbeds(t *testing.T) {
 	}
 	es, fallback, err := Embeds(long, Sample())
 	if err != nil || fallback != nil || len(es) != 2 || es[0].Title != "example-host (1/2)" || es[1].Title != "example-host (2/2)" ||
-		es[0].Color != colorBad || es[0].Tone != ToneBad || es[0].Footer != "update run" || !es[0].At.Equal(Sample().At) {
+		es[0].Color != colorMain || es[0].Tone != ToneMain || es[0].Footer != "update run" || !es[0].At.Equal(Sample().At) {
 		t.Fatalf("long: %d embeds, %v, %v, %+v", len(es), fallback, err, es)
 	}
 	silent, err := Parse("{{with .Updated}}x{{end}}")
@@ -573,13 +589,26 @@ func TestEmbeds(t *testing.T) {
 		len(es) != 1 || es[0].Description != "custom prod" {
 		t.Errorf("an old template on prod: %+v, %v, %v", es, fallback, err)
 	}
+	// Only the sample with every part shows in the main color; the other
+	// samples, alone or with a second host, show their worst result.
+	for _, c := range []struct {
+		m    Message
+		tone string
+	}{{kinds[0].Message, ToneMain}, {kinds[3].Message, ToneUpdated}, {kinds[4].Message, ToneBad}} {
+		es, _, _ := Embeds(defaultTemplate(), c.m)
+		shared, _, _ := Shared(defaultTemplate(), SampleRun(c.m))
+		if len(es) != 1 || es[0].Tone != c.tone || len(shared) != 1 || shared[0].Tone != c.tone {
+			t.Errorf("%s: %+v, shared %+v", c.m.Host, es, shared)
+		}
+	}
 	if kinds[0].Name != "Message with every part" || kinds[1].Message.Host != "example-host" || len(kinds) != len(samples()) {
 		t.Errorf("sample kinds: %+v", kinds[:2])
 	}
 }
 
-// By default the hosts of a run share a message, an embed each with its
-// own color; per host, each gets its own.
+// By default the hosts of a run share one embed, each under its name
+// between two rules with an empty line above and below, in the color of the
+// worst; per host, each gets its own message.
 func TestARunSharesAMessage(t *testing.T) {
 	run := store.Run{Kind: "update", Started: t0, Hosts: []store.HostRun{
 		{Agent: "a", Containers: []store.Entry{entry("web", "updated", false)}},
@@ -591,11 +620,16 @@ func TestARunSharesAMessage(t *testing.T) {
 	if err := (&Notifier{Discord: d}).Run(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.bodies) != 1 || len(f.bodies[0].Embeds) != 2 {
+	if len(f.bodies) != 1 || len(f.bodies[0].Embeds) != 1 {
 		t.Fatalf("%d posts: %+v", len(f.bodies), f.bodies)
 	}
-	if a, b := f.bodies[0].Embeds[0], f.bodies[0].Embeds[1]; a.Title != "a" || a.Color != colorUpdated || b.Title != "b" || b.Color != colorBad {
-		t.Errorf("embeds %+v, %+v", a, b)
+	e := f.bodies[0].Embeds[0]
+	r := strings.Repeat("─", 30)
+	head := func(h string) string { return r + "\n🖥 **" + h + "**\n" + r + "\n\n" }
+	if e.Title != "Update run" || e.Color != colorBad || e.Footer.Text != "update run" ||
+		!strings.HasPrefix(e.Description, "\u200b\n"+head("a")+"✅ **Updated:**") ||
+		!strings.Contains(e.Description, "`web:1`\n\n"+head("b")+"🔁 **Rolled back:**") || strings.Contains(e.Description, "**c**") {
+		t.Errorf("embed %+v", e)
 	}
 	f.bodies = nil
 	if err := (&Notifier{Discord: d, PerHost: func() bool { return true }}).Run(context.Background(), run); err != nil {
@@ -603,6 +637,79 @@ func TestARunSharesAMessage(t *testing.T) {
 	}
 	if len(f.bodies) != 2 || len(f.bodies[0].Embeds) != 1 || f.bodies[1].Embeds[0].Title != "b" {
 		t.Errorf("per host: %d posts", len(f.bodies))
+	}
+}
+
+// A shared message too long for one embed goes on in more, with numbered
+// titles, cut between hosts; a host too long for one embed is cut inside.
+func TestASharedMessageGoesInParts(t *testing.T) {
+	host := func(name string, n int) store.HostRun {
+		var es []store.Entry
+		for i := range n {
+			es = append(es, entry(fmt.Sprintf("%s-app-%03d", name, i), "updated", false))
+		}
+		return store.HostRun{Agent: name, Containers: es}
+	}
+	run := store.Run{Kind: "update", Started: t0, Hosts: []store.HostRun{host("a", 40), host("b", 40), host("c", 300)}}
+	es, fallbacks, err := Shared(defaultTemplate(), Build(run))
+	if err != nil || len(fallbacks) != 0 || len(es) < 3 {
+		t.Fatalf("%d embeds, %v, %v", len(es), fallbacks, err)
+	}
+	all := ""
+	for i, e := range es {
+		if utf8.RuneCountInString(e.Description) > MaxDescription || !strings.HasPrefix(e.Description, "\u200b\n") ||
+			e.Title != fmt.Sprintf("Update run (%d/%d)", i+1, len(es)) {
+			t.Errorf("part %d: title %q, %d characters", i, e.Title, utf8.RuneCountInString(e.Description))
+		}
+		all += e.Description
+	}
+	for _, h := range []string{"a", "b", "c"} {
+		if n := strings.Count(all, "🖥 **"+h+"**\n"); n != 1 {
+			t.Errorf("host %s heads %d parts", h, n)
+		}
+	}
+	if !strings.Contains(es[0].Description, "🖥 **b**") || !strings.HasPrefix(es[1].Description, "\u200b\n"+strings.Repeat("─", 30)+"\n🖥 **c**") ||
+		es[0].Host != "a, b" || es[1].Host != "c" {
+		t.Errorf("a and b share the first part and c starts the second: %q, %q", es[0].Host, es[1].Host)
+	}
+	// A host too long for one embed goes on under its name, marked
+	// continued, and its name never ends a part without its text.
+	r := strings.Repeat("─", 30)
+	for _, size := range []int{4200, 10000} {
+		run := store.Run{Kind: "check", Started: t0, Hosts: []store.HostRun{{Agent: "node-a", Skipped: strings.Repeat("x", size)}}}
+		es, _, err := Shared(defaultTemplate(), Build(run))
+		if err != nil || len(es) < 2 {
+			t.Fatalf("%d: %d embeds, %v", size, len(es), err)
+		}
+		for i, e := range es {
+			head := "\u200b\n" + r + "\n🖥 **node-a**\n" + r + "\n\n⚠️ **Left out:** x"
+			if i > 0 {
+				head = "\u200b\n" + r + "\n🖥 **node-a** (continued)\n" + r + "\n\nx"
+			}
+			if !strings.HasPrefix(e.Description, head) || utf8.RuneCountInString(e.Description) > MaxDescription {
+				t.Errorf("%d, part %d: %d characters, starts %q", size, i, utf8.RuneCountInString(e.Description), e.Description[:min(len(e.Description), 120)])
+			}
+		}
+	}
+	// The first part keeps room only for its own heading, so a line that
+	// fits under it is not cut early.
+	head := func(h, more string) string { return rule + "\n🖥 **" + h + "**" + more + "\n" + rule + "\n\n" }
+	prefix := "⚠️ **Left out:** "
+	fit := MaxDescription - utf8.RuneCountInString(blankTop+head("node-a", "")+prefix) - 1
+	m := Message{Host: "node-a", Kind: "check", LeftOut: strings.Repeat("x", fit), Note: strings.Repeat("y", 100)}
+	if es, _, err := Shared(defaultTemplate(), []Message{m}); err != nil || len(es) != 2 ||
+		es[0].Description != blankTop+head("node-a", "")+prefix+strings.Repeat("x", fit) ||
+		es[1].Description != blankTop+head("node-a", " (continued)")+strings.Repeat("y", 100) {
+		t.Errorf("a line that fits the first part: %d embeds, %v", len(es), err)
+	}
+	// A name of any length leaves room for the text under it.
+	long := Message{Host: strings.Repeat("a", 4100), Kind: "check", LeftOut: "broken"}
+	if es, _, err := Shared(defaultTemplate(), []Message{long}); err != nil || len(es) != 1 ||
+		!strings.Contains(es[0].Description, "🖥 **"+strings.Repeat("a", 100)+"…**") || !strings.HasSuffix(es[0].Description, "broken") {
+		t.Errorf("a long name: %+v, %v", es, err)
+	}
+	if es, _, err := Shared(defaultTemplate(), nil); err != nil || len(es) != 0 {
+		t.Errorf("no hosts: %+v, %v", es, err)
 	}
 }
 

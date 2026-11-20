@@ -66,8 +66,10 @@ type Config struct {
 	DefaultCheck, DefaultUpdate server.When
 	Watch                       time.Duration
 	// Auth puts the pages behind sign-in; nil leaves access to a proxy (R33).
-	Auth    *auth.Auth
-	Version string
+	Auth *auth.Auth
+	// Gravatar shows the signed-in user's Gravatar in the sidebar.
+	Gravatar bool
+	Version  string
 	// Base is the context runs started here run under.
 	Base context.Context
 	// Status asks one agent for its version, for the hosts page.
@@ -176,13 +178,19 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("/", app)
 	}
-	return securityHeaders(http.NewCrossOriginProtection().Handler(mux))
+	return securityHeaders(http.NewCrossOriginProtection().Handler(mux), s.cfg.Gravatar)
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+// securityHeaders lets images come from gravatar.com only when Gravatar is on.
+func securityHeaders(next http.Handler, gravatar bool) http.Handler {
+	img := "'self' data:"
+	if gravatar {
+		img += " " + gravatarOrigin
+	}
+	csp := "default-src 'self'; img-src " + img + "; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
@@ -191,10 +199,15 @@ func securityHeaders(next http.Handler) http.Handler {
 
 // page is what every page template gets.
 type page struct {
-	Page     string
-	Title    string
-	Version  string
-	User     *auth.User
+	Page    string
+	Title   string
+	Version string
+	User    *auth.User
+	// Initial and Avatar draw the signed-in user in the sidebar. Avatar is
+	// their Gravatar, drawn over the initial; empty when Gravatar is off or
+	// the ID token had no email.
+	Initial  string
+	Avatar   string
 	Activity activity
 	// Nav lists the hosts in the sidebar; Host is the one whose page this is.
 	Nav  []navHost
@@ -258,6 +271,14 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, p page) 
 func (s *Server) newPage(r *http.Request, st store.State, name, title string, data any) page {
 	p := page{Page: name, Title: title, User: auth.UserFrom(r.Context()),
 		Activity: activity{Active: s.cfg.Runner.Active(), Page: name}, Data: data}
+	if u := p.User; u != nil {
+		name := u.Name
+		if name == "" {
+			name = u.Subject
+		}
+		p.Initial = initial(name)
+		p.Avatar = s.avatar(u.Email)
+	}
 	if len(st.Runs) > 0 {
 		p.Activity.Seen = st.Runs[len(st.Runs)-1].ID
 	}
@@ -897,9 +918,9 @@ func (s *Server) saveTemplate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings?saved=template", http.StatusSeeOther)
 }
 
-// testTemplate sends the sample message with the template in the editor,
-// saved or not (P10), grouped as the form says: with a second sample host
-// when hosts share messages.
+// testTemplate sends the sample message the preview shows with the template
+// in the editor, saved or not (P10), grouped as the form says: with a second
+// sample host when hosts share messages.
 func (s *Server) testTemplate(w http.ResponseWriter, r *http.Request) {
 	res := testResult{}
 	switch t, err := notify.Parse(strings.ReplaceAll(r.FormValue("template"), "\r\n", "\n")); {
@@ -910,7 +931,12 @@ func (s *Server) testTemplate(w http.ResponseWriter, r *http.Request) {
 	default:
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
-		msgs, notice := notify.SampleRun(notify.Sample()), "Sent a sample message for example-host and example-host-2."
+		kinds := notify.SampleKinds()
+		sample, _ := strconv.Atoi(r.FormValue("sample"))
+		if sample < 0 || sample >= len(kinds) {
+			sample = 0
+		}
+		msgs, notice := notify.SampleRun(kinds[sample].Message), "Sent a sample message for example-host and example-host-2."
 		perHost := perHostForm(r)
 		if perHost {
 			msgs, notice = msgs[:1], "Sent a sample message for example-host."

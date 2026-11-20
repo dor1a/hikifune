@@ -48,9 +48,9 @@ func TestTemplatePreview(t *testing.T) {
 		return rec.Code, rec.Body.String()
 	}
 
-	// The page's script gets the embed alone: the sample host as the title,
-	// the result's color, the run in the footer.
-	code, body := post(url.Values{"template": {"**{{.Host}}** <b> {{len .Updated}}"}, "sample": {"3"}}, true)
+	// The page's script gets the embed alone: per host, the sample host as
+	// the title, the result's color, the run in the footer.
+	code, body := post(url.Values{"template": {"**{{.Host}}** <b> {{len .Updated}}"}, "sample": {"3"}, "messages": {"host"}}, true)
 	if code != http.StatusOK || strings.Contains(body, "<h1") ||
 		!strings.Contains(body, `<div class="embed-title">example-host</div>`) ||
 		!strings.Contains(body, "<strong>example-host</strong> &lt;b&gt; 1") ||
@@ -58,7 +58,7 @@ func TestTemplatePreview(t *testing.T) {
 		t.Errorf("preview: %d\n%s", code, body)
 	}
 	// A sample out of range is the first.
-	if _, body := post(url.Values{"template": {"{{.Kind}}"}, "sample": {"99"}}, true); !strings.Contains(body, `<div class="embed-body">update</div>`) {
+	if _, body := post(url.Values{"template": {"{{.Kind}}"}, "sample": {"99"}, "messages": {"host"}}, true); !strings.Contains(body, `<div class="embed-body">update</div>`) {
 		t.Errorf("sample 99:\n%s", body)
 	}
 	// A template that does not parse says why.
@@ -74,7 +74,7 @@ func TestTemplatePreview(t *testing.T) {
 
 	// Without the script, the whole page comes back with the template kept
 	// in the editor and nothing saved.
-	if code, body := post(url.Values{"template": {"kept {{.Host}}"}}, false); code != http.StatusOK ||
+	if code, body := post(url.Values{"template": {"kept {{.Host}}"}, "messages": {"host"}}, false); code != http.StatusOK ||
 		!strings.Contains(body, `<h1 class="title">Settings</h1>`) || !strings.Contains(body, ">kept {{.Host}}</textarea>") ||
 		!strings.Contains(body, `<div class="embed-body">kept example-host</div>`) {
 		t.Errorf("preview without the script: %d\n%s", code, body)
@@ -83,9 +83,10 @@ func TestTemplatePreview(t *testing.T) {
 		t.Errorf("the preview saved the template: %q", got.Settings.Template)
 	}
 	// By default the hosts of a run share a message: the preview shows a
-	// second sample host in the same one. Per host, each has its own.
+	// second sample host in the same embed. Per host, each has its own.
 	if _, body := post(url.Values{"template": {"{{.Host}}"}}, true); strings.Count(body, `<div class="discord-msg">`) != 1 ||
-		!strings.Contains(body, `<div class="embed-title">example-host-2</div>`) {
+		strings.Count(body, `<div class="embed-title">`) != 1 || !strings.Contains(body, `<div class="embed-title">Update run</div>`) ||
+		!strings.Contains(body, "<strong>example-host-2</strong>") {
 		t.Errorf("a run's message:\n%s", body)
 	}
 	if _, body := post(url.Values{"template": {"{{.Host}}"}, "messages": {"host"}}, true); strings.Count(body, `<div class="discord-msg">`) != 1 ||
@@ -93,7 +94,7 @@ func TestTemplatePreview(t *testing.T) {
 		t.Errorf("one host's message:\n%s", body)
 	}
 	// Settings shows the saved template's preview from the start.
-	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<div class="embed tone-bad">`) ||
+	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<div class="embed tone-main">`) ||
 		!strings.Contains(body, `<option value="0" selected>Message with every part</option>`) {
 		t.Errorf("settings page has no preview")
 	}

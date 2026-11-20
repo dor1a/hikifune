@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -165,7 +166,7 @@ func TestContainersShowsEveryContainer(t *testing.T) {
 		}
 	}
 	// One list: a single table with the host column.
-	if _, body := do(t, s.Handler(), "GET", "/containers?view=list", nil); strings.Count(body, "<table") != 1 || !strings.Contains(body, "<th>Host</th>") ||
+	if _, body := do(t, s.Handler(), "GET", "/containers?view=list", nil); strings.Count(body, "<table") != 1 || !strings.Contains(body, `<th class="c-host">Host</th>`) ||
 		!strings.Contains(body, "b: the agent runs v0") {
 		t.Errorf("one list: %d tables", strings.Count(body, "<table"))
 	}
@@ -382,9 +383,10 @@ func TestNotificationSettings(t *testing.T) {
 	}
 	mu.Lock()
 	// By default the hosts of a run share a message, so the test sends two
-	// sample hosts in one.
-	if len(posts) != 1 || !strings.Contains(posts[0], `"description":"test example-host"`) ||
-		!strings.Contains(posts[0], `"description":"test example-host-2"`) {
+	// sample hosts in one embed, each under its name.
+	if len(posts) != 1 || strings.Count(posts[0], `"title"`) != 1 || !strings.Contains(posts[0], `"title":"Update run"`) ||
+		!strings.Contains(posts[0], `\n🖥 **example-host**\n`) || !strings.Contains(posts[0], `\n\ntest example-host\n\n──────────────────────────────\n🖥 **example-host-2**\n`) ||
+		!strings.Contains(posts[0], `\n\ntest example-host-2"`) {
 		t.Errorf("posts %v", posts)
 	}
 	posts = nil
@@ -396,13 +398,21 @@ func TestNotificationSettings(t *testing.T) {
 	if len(posts) != 1 || strings.Contains(posts[0], "example-host-2") {
 		t.Errorf("posts per host %v", posts)
 	}
+	posts = nil
+	mu.Unlock()
+	// Send test sends the sample the preview shows.
+	do(t, h, "POST", "/settings/template/test", url.Values{"template": {"{{.Kind}}"}, "sample": {"1"}})
+	mu.Lock()
+	if len(posts) != 1 || !strings.Contains(posts[0], `"title":"Check run"`) || !strings.Contains(posts[0], `\n\ncheck\n\n`) {
+		t.Errorf("send test of the check sample %v", posts)
+	}
 	mu.Unlock()
 	// The choice is saved with the template, and shown again.
 	do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Kind}} on {{.Host}}"}, "messages": {"host"}})
 	if got, _ := st.Read(); !got.Settings.MessagePerHost {
 		t.Error("one message per host was not saved")
 	}
-	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<option value="host" selected>One per host</option>`) {
+	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<option value="host" selected>A message for each host</option>`) {
 		t.Error("one message per host not shown")
 	}
 	do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Kind}} on {{.Host}}"}, "messages": {"run"}})
@@ -445,7 +455,7 @@ func TestHosts(t *testing.T) {
 			t.Errorf("host page has no %q", want)
 		}
 	}
-	if strings.Contains(body, "<th>Host</th>") {
+	if strings.Contains(body, `<th class="c-host">Host</th>`) {
 		t.Error("host page has a host column")
 	}
 	if res, _ := do(t, h, "GET", "/hosts/c", nil); res.StatusCode != http.StatusNotFound {
@@ -617,6 +627,92 @@ func TestSignIn(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if len(r.specs) != 1 || r.specs[0].Manual != "Test User" {
 		t.Fatalf("specs %+v", r.specs)
+	}
+}
+
+// The sidebar shows the signed-in user's initial, and their Gravatar only with
+// HIKIFUNE_GRAVATAR on, which also lets the page load it.
+func TestGravatar(t *testing.T) {
+	const base = "https://hikifune.example.com"
+	const img = `<img src="https://gravatar.com/avatar/b4c9a289323b21a01c3e940f150eb9b8c542587f1abfd8f0e1cc1ffc5e475514?s=64&amp;d=blank" alt="" width="28" height="28">`
+	for _, on := range []bool{false, true} {
+		p := authtest.New(t)
+		a := auth.New(auth.Settings{PublicURL: base, Issuer: p.URL, ClientID: authtest.ClientID, ClientSecret: "s",
+			Group: "hikifune-users", GroupsClaim: "groups", Scopes: []string{"openid", "profile", "email"},
+			SessionKey: []byte(strings.Repeat("k", 32))}, nil)
+		s, _ := newServer(t, fixture(t), &fakeRunner{}, a)
+		s.cfg.Gravatar = on
+		h := s.Handler()
+		cookies, _ := p.SignIn(t, h, base, "/hosts")
+		req := httptest.NewRequest("GET", "/hosts", nil)
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body, csp := rec.Body.String(), rec.Header().Get("Content-Security-Policy")
+		if rec.Code != http.StatusOK || !strings.Contains(body, `<span class="face" aria-hidden="true">T`) || !strings.Contains(body, `<span class="name">Test User</span>`) {
+			t.Fatalf("gravatar %v: %d, no initial and name:\n%s", on, rec.Code, body)
+		}
+		if strings.Contains(body, img) != on || strings.Contains(body, "gravatar.com") != on {
+			t.Errorf("gravatar %v: the image is wrong:\n%s", on, body)
+		}
+		if strings.Contains(csp, "img-src 'self' data: https://gravatar.com;") != on || !strings.Contains(csp, "img-src 'self' data:") {
+			t.Errorf("gravatar %v: CSP %q", on, csp)
+		}
+	}
+}
+
+// An address of blanks alone is no address; one with blanks around it is
+// trimmed and lowered first.
+func TestAvatar(t *testing.T) {
+	s, _ := newServer(t, fixture(t), &fakeRunner{}, nil)
+	if got := s.avatar("user@example.com"); got != "" {
+		t.Errorf("Gravatar off: %q", got)
+	}
+	s.cfg.Gravatar = true
+	for _, blank := range []string{"", "  \t "} {
+		if got := s.avatar(blank); got != "" {
+			t.Errorf("%q: %q", blank, got)
+		}
+	}
+	if got := s.avatar("  USER@Example.COM  "); got != "https://gravatar.com/avatar/b4c9a289323b21a01c3e940f150eb9b8c542587f1abfd8f0e1cc1ffc5e475514?s=64&d=blank" {
+		t.Errorf("trimmed: %q", got)
+	}
+}
+
+func TestInitial(t *testing.T) {
+	for in, want := range map[string]string{"dor1": "D", " 9lives": "9", "_x": "X", "ärger": "Ä", "": "?", "--": "?"} {
+		if got := initial(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A save shows its success message beside the button it came from, marked to
+// fade out; without saved= in the address there is none.
+func TestSavedMessages(t *testing.T) {
+	s, _ := newServer(t, fixture(t), &fakeRunner{}, nil)
+	h := s.Handler()
+	for _, target := range []string{"/settings?saved=1", "/settings?saved=template", "/hosts?saved=a", "/hosts/a?saved=1"} {
+		res, body := do(t, h, "GET", target, nil)
+		if res.StatusCode != http.StatusOK || strings.Count(body, `class="msg flash"`) != 1 {
+			t.Errorf("%s: %d, %d flash messages", target, res.StatusCode, strings.Count(body, `class="msg flash"`))
+		}
+	}
+	for _, target := range []string{"/settings", "/hosts", "/hosts/a"} {
+		if _, body := do(t, h, "GET", target, nil); strings.Contains(body, `class="msg flash"`) {
+			t.Errorf("%s shows a saved message", target)
+		}
+	}
+	// The schedule's and the template's messages sit in their forms' buttons.
+	_, body := do(t, h, "GET", "/settings?saved=1", nil)
+	if !regexp.MustCompile(`<button type="submit" class="primary">Save</button>\s*(<button[^>]*>[^<]*</button>\s*)?<span class="msg flash" role="status">Saved\. The schedule`).MatchString(body) {
+		t.Errorf("the schedule's message is not beside Save:\n%s", body)
+	}
+	_, body = do(t, h, "GET", "/settings?saved=template", nil)
+	if !regexp.MustCompile(`<span class="msg flash" role="status">Saved\. The next notification uses this template\.</span>\s*<span id="test-result"`).MatchString(body) {
+		t.Errorf("the template's message is not beside Save:\n%s", body)
 	}
 }
 
