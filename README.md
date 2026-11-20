@@ -9,17 +9,18 @@
 </div>
 
 > [!NOTE]
-> This is a release candidate. [The plan](docs/PLAN.md) has the design decisions and what is left before 0.1.0.
+> 0.1.0 is the first release. [The plan](docs/PLAN.md) has the requirements and the design decisions behind them.
 
 ## What it does
 
 - One small agent runs on each Docker host, and one server holds the schedule, the web UI and the notifications. The server dials the agents; an agent only answers.
 - Every container's image is checked for a newer digest, by default every day at 00:00, and the ones that have one are updated at 01:00.
+- The web UI opens on Home: the hosts, containers and updates at a glance, the next runs, the latest runs, and a live map of the server and its agents (top down, orbit or flow) that shows which agents answer and which run is going on.
 - Everything is updated unless told not to. `hikifune.protected=true` on a container keeps it from being updated automatically; it is still checked, and the web UI lists every container either way.
 - A container is recreated from the configuration Docker reports for it, with only the image changed, so health checks, GPU requests, networks and mounts come back as they were. Defaults that came from the old image are dropped, so the new image's apply.
 - The old container is kept under another name until the new one has run for two minutes. With a health check, the new one must not turn unhealthy meanwhile (starting is fine) and must be healthy at the end. If not, it is rolled back, and that image digest is skipped at the next run.
 - After a host's updates, its dangling images (no tag, no container) are pruned: the old images the updates left, and any other dangling image on that host. The space freed is reported.
-- After each scheduled run, each host with something to say gets one Discord message listing what is available, updated, rolled back or failed, with the reason for each rollback and failure, and the space the prune freed. A host with nothing to say gets none. The message template can be edited in the web UI.
+- After each scheduled run, Discord gets what is available, updated, rolled back or failed on each host with something to say, with the reason for each rollback and failure, and the space the prune freed. By default a run's hosts share a message, an embed each in the color of its worst result, going on in the next message past Discord's 10 embeds or 6,000 characters; Settings can give each host its own message instead. A host with nothing to say is left out. The message template can be edited in the web UI, next to a preview.
 - Works with Docker 24 (Engine API 1.43) and newer, on amd64 and arm64.
 
 ## How it fits together
@@ -49,7 +50,7 @@ Each agent asks the registries itself, so a private registry's credentials stay 
 
 ## Install
 
-The files are in [deploy/compose](deploy/compose). The examples use the release candidate's images, `ghcr.io/dor1a/hikifune:0.1.0-rc.1` and `ghcr.io/dor1a/hikifune-agent:0.1.0-rc.1`.
+The files are in [deploy/compose](deploy/compose). The examples use the 0.1.0 images, `ghcr.io/dor1a/hikifune:0.1.0` and `ghcr.io/dor1a/hikifune-agent:0.1.0`.
 
 ### 1. The server
 
@@ -57,8 +58,8 @@ On the host that runs the server:
 
 ```sh
 mkdir hikifune && cd hikifune
-curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0-rc.1/deploy/compose/server/compose.yaml
-curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0-rc.1/deploy/compose/server/.env.example
+curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/server/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/server/.env.example
 ```
 
 In `.env`, set at least:
@@ -88,8 +89,8 @@ It prints `HIKIFUNE_AGENT_TOKEN=...` once. On that host:
 
 ```sh
 mkdir hikifune-agent && cd hikifune-agent
-curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0-rc.1/deploy/compose/agent/compose.yaml
-curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0-rc.1/deploy/compose/agent/.env.example
+curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/agent/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/agent/.env.example
 ```
 
 Put the token in `.env`, and start the agent with its socket proxy:
@@ -102,7 +103,7 @@ The agent's API accepts only requests with its token, and leaves encryption to t
 
 ### 3. The first runs
 
-The host shows up in the web UI. For the first days on a host, turn its **check-only** switch on: it is checked on schedule but not updated, and you see what would be. Press **Check now** to check right away, or run `docker compose exec hikifune hikifune run check` on the server.
+The host shows up in the web UI. For the first days on a host, turn its **check-only** switch on: it is checked on schedule but not updated, and you see what would be. Press **Check now** in the menu to check right away, or run `docker compose exec hikifune hikifune run check` on the server.
 
 ## The Docker API
 
