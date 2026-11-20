@@ -43,6 +43,21 @@ func TestBuildACheckRun(t *testing.T) {
 	}
 }
 
+// A prune that freed nothing still says so; a host that did not prune says
+// nothing about it.
+func TestAPruneOfNothingIsReported(t *testing.T) {
+	for _, tt := range []struct {
+		pruned bool
+		want   string
+	}{{true, "0 B"}, {false, ""}} {
+		run := store.Run{Kind: "update", Started: t0, Hosts: []store.HostRun{{Agent: "a", Pruned: tt.pruned,
+			Containers: []store.Entry{entry("prom", "updated", true)}}}}
+		if m := Build(run); len(m) != 1 || m[0].Reclaimed != tt.want {
+			t.Errorf("pruned %v: %+v", tt.pruned, m)
+		}
+	}
+}
+
 func TestBuildAnUpdateRun(t *testing.T) {
 	back := entry("web", "rolled_back", true)
 	back.Reason = "exited with code 1 within the 2m watch"

@@ -300,10 +300,6 @@ func (f *fakeEngine) ContainerRemove(ctx context.Context, id string, force bool)
 	return nil
 }
 
-func (f *fakeEngine) ImageRemove(ctx context.Context, id string) error {
-	return f.record("remove image %s", id)
-}
-
 func (f *fakeEngine) ImagePlatformID(ctx context.Context, ref string) (string, bool, error) {
 	if f.platformIDs == nil {
 		return "", false, nil
@@ -332,12 +328,13 @@ func ordered(calls, want []string) bool {
 func TestRunUpdates(t *testing.T) {
 	f := newFake(t)
 	r := run(context.Background(), f, "apps-web-1", f.opts())
-	if r.Outcome != Updated || !r.OldImageRemoved || r.Reason != "" || r.Note != "" {
+	if r.Outcome != Updated || r.Reason != "" || r.Note != "" {
 		t.Fatalf("result = %+v", r)
 	}
 	if r.Container != "apps-web-1" || r.OldImageID != oldImage || r.NewImageID != newImage {
 		t.Errorf("result = %+v", r)
 	}
+	// The old image is left for the prune after the run (R20).
 	want := []string{
 		"pull reg.example/team/web:1 auth=auth-for-reg.example",
 		"create apps-web-1-hikifune-new",
@@ -347,7 +344,6 @@ func TestRunUpdates(t *testing.T) {
 		"rename new apps-web-1",
 		"start new",
 		"remove old force=false",
-		"remove image " + oldImage,
 	}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(f.calls, "\n"), strings.Join(want, "\n"))
@@ -607,24 +603,12 @@ func TestRunRollsBackAfterCancel(t *testing.T) {
 	}
 }
 
-func TestRunKeepsAnImageInUse(t *testing.T) {
-	f := newFake(t)
-	f.fail["remove image "+oldImage] = &docker.Error{Status: http.StatusConflict, Message: "image is being used"}
-	r := run(context.Background(), f, "apps-web-1", f.opts())
-	if r.Outcome != Updated || r.OldImageRemoved || r.Note != "" {
-		t.Fatalf("result %+v", r)
-	}
-}
-
-func TestRunKeepsAnOldImageThatIsStillNamed(t *testing.T) {
+func TestRunNotesAnOldImageThatIsStillNamed(t *testing.T) {
 	f := newFake(t)
 	f.oldTags = []string{"reg.example/team/web:old"}
 	r := run(context.Background(), f, "apps-web-1", f.opts())
-	if r.Outcome != Updated || r.OldImageRemoved || !strings.Contains(r.Note, "still named reg.example/team/web:old") {
+	if r.Outcome != Updated || !strings.Contains(r.Note, "still named reg.example/team/web:old") {
 		t.Fatalf("result %+v", r)
-	}
-	if slices.Contains(f.calls, "remove image "+oldImage) {
-		t.Errorf("the named image was removed: %v", f.calls)
 	}
 }
 

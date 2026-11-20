@@ -37,7 +37,8 @@ E2E_HOSTS = docker24 docker29
 .PHONY: e2e e2e-down
 
 # Integration tests against throwaway Docker-in-Docker daemons, never the
-# Docker that runs them.
+# Docker that runs them. One package at a time (-p 1): they share the
+# daemons, and one package's prune would take another's old images.
 e2e:
 	$(E2E) up -d --wait
 	for h in $(E2E_HOSTS); do \
@@ -49,7 +50,7 @@ e2e:
 		-v hikifune-gomod:/go/pkg/mod -v hikifune-gocache:/root/.cache/go-build \
 		-v "$(CURDIR):/src" -w /src \
 		-e HIKIFUNE_E2E_HOSTS="$(foreach h,$(E2E_HOSTS),tcp://$(h):2375)" \
-		$(GO_IMAGE) sh -c 'go test -tags e2e -count=1 -v -run E2E ./internal/... && \
+		$(GO_IMAGE) sh -c 'go test -tags e2e -count=1 -p 1 -v -run E2E ./internal/... && \
 			for h in $$HIKIFUNE_E2E_HOSTS; do HIKIFUNE_DOCKER_HOST=$$h go run ./cmd/hikifune-agent inventory > /dev/null || exit 1; done && \
 			echo "agent inventory ok on $$HIKIFUNE_E2E_HOSTS"'
 

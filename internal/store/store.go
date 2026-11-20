@@ -81,7 +81,10 @@ type HostRun struct {
 	Skipped      string  `json:"skipped,omitempty"` // why the host was left out (R16)
 	Error        string  `json:"error,omitempty"`
 	Containers   []Entry `json:"containers,omitempty"`
-	Reclaimed    int64   `json:"reclaimed,omitempty"`
+	// Pruned is set when the host pruned after its updates (R20), so a
+	// prune that freed nothing still reports its 0 bytes.
+	Pruned    bool  `json:"pruned,omitempty"`
+	Reclaimed int64 `json:"reclaimed,omitempty"`
 }
 
 // Listed tells whether the host part holds a container list: it has

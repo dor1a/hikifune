@@ -437,13 +437,37 @@ func (r *Runner) host(ctx context.Context, spec Spec, a store.Agent, failed []st
 		}
 	}
 	if updated {
-		p, err := api.Prune(ctx)
+		p, err := r.prune(ctx, api)
 		if err != nil {
 			hr.Error = join(hr.Error, "prune: "+err.Error())
+		} else {
+			hr.Pruned, hr.Reclaimed = true, p.Reclaimed
 		}
-		hr.Reclaimed = p.Reclaimed
 	}
 	return res
+}
+
+// prune prunes the host after its updates (R20). An agent that holds the
+// host for something else, such as an update by hand, answers 409; prune
+// asks again until the host is free, for as long as a job may take, so the
+// old images still go.
+func (r *Runner) prune(ctx context.Context, api agentAPI) (protocol.Pruned, error) {
+	waiting, cancel := context.WithTimeout(ctx, r.watch()+jobSlack)
+	defer cancel()
+	for {
+		p, err := api.Prune(ctx)
+		var se *StatusError
+		if !errors.As(err, &se) || se.Status != http.StatusConflict {
+			return p, err
+		}
+		if sleep(waiting, r.poll()) != nil {
+			if ctx.Err() != nil {
+				// The run was cancelled, which the agent's answer would hide.
+				return p, fmt.Errorf("%w; the agent last answered: %v", ctx.Err(), err)
+			}
+			return p, fmt.Errorf("gave up waiting %s for the host to be free; the agent last answered: %w", r.watch()+jobSlack, err)
+		}
+	}
 }
 
 // checkOnlyNow reads the host's check-only switch again, so turning it on

@@ -1,0 +1,39 @@
+name: hikifune-agent
+
+services:
+  hikifune-agent:
+    image: ghcr.io/dor1a/hikifune-agent:0.1.0-rc.1
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "7778:7778"
+    networks:
+      - default
+      - docker
+    depends_on:
+      - docker-socket-proxy
+
+  # Recreating the proxy would cut the agent off from Docker mid-update.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    labels:
+      hikifune.protected: "true"
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      SYSTEM: 1
+      POST: 1
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+    networks:
+      - docker
+
+networks:
+  docker:
+    internal: true

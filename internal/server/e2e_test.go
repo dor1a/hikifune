@@ -110,6 +110,12 @@ func TestE2EServer(t *testing.T) {
 		if h.Error != "" {
 			t.Errorf("%s: %s", h.Agent, h.Error)
 		}
+		// The old images of srv-db and srv-web each had a 1 MB layer of
+		// their own, which the prune after the run frees (R20). make e2e runs
+		// one package at a time, so no other test prunes them first.
+		if !h.Pruned || h.Reclaimed < 2_000_000 {
+			t.Errorf("%s: pruned %v, reclaimed %d bytes after two updates", h.Agent, h.Pruned, h.Reclaimed)
+		}
 		for name, want := range map[string]string{"srv-db": "updated", "srv-web": "updated",
 			"srv-bad": "rolled_back", "srv-guard": "skipped", "srv-self": "skipped"} {
 			e := find(t, h, name)
@@ -145,6 +151,7 @@ func TestE2EServer(t *testing.T) {
 		lines := strings.Split(back, "\n")
 		if !strings.Contains(e.Description, "**Updated**") || !strings.Contains(e.Description, "• `srv-db`") ||
 			!strings.Contains(e.Description, "• `srv-web`") || len(lines) < 2 || strings.TrimSpace(lines[1]) == "" ||
+			!strings.Contains(e.Description, "Reclaimed ") ||
 			strings.Contains(e.Description, "srv-guard") || e.Color != 0xC64343 {
 			t.Errorf("update message for %s: color %x\n%s", e.Title, e.Color, e.Description)
 		}

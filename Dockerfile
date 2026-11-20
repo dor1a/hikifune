@@ -16,9 +16,11 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
  && mkdir -p /out/data /out/rootfs/tmp \
  && chmod 1777 /out/rootfs/tmp
 
+# The binaries go in /usr/local/bin, on the default PATH, so docker exec can
+# run "hikifune agent add" and "hikifune-agent update" by name.
 FROM scratch AS agent
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/hikifune-agent /hikifune-agent
+COPY --from=build /out/hikifune-agent /usr/local/bin/hikifune-agent
 # The host lock lives here, shared by the agent's jobs and an update by hand
 # through docker exec; writable by any user the agent runs as. Copied with its
 # parent, since COPY of a directory copies only what is in it.
@@ -26,16 +28,16 @@ COPY --from=build /out/rootfs/ /
 USER 65532:65532
 ENV HIKIFUNE_AGENT_LISTEN=:7778
 EXPOSE 7778
-HEALTHCHECK --interval=30s --timeout=5s CMD ["/hikifune-agent", "healthcheck"]
-ENTRYPOINT ["/hikifune-agent"]
+HEALTHCHECK --interval=30s --timeout=5s CMD ["/usr/local/bin/hikifune-agent", "healthcheck"]
+ENTRYPOINT ["/usr/local/bin/hikifune-agent"]
 
 FROM scratch AS server
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/hikifune /hikifune
+COPY --from=build /out/hikifune /usr/local/bin/hikifune
 # The state directory, owned by the server's user so a new volume is too.
 COPY --from=build --chown=65532:65532 /out/data /data
 USER 65532:65532
 ENV HIKIFUNE_LISTEN=:7777 HIKIFUNE_DATA=/data
 EXPOSE 7777
-HEALTHCHECK --interval=30s --timeout=5s CMD ["/hikifune", "healthcheck"]
-ENTRYPOINT ["/hikifune"]
+HEALTHCHECK --interval=30s --timeout=5s CMD ["/usr/local/bin/hikifune", "healthcheck"]
+ENTRYPOINT ["/usr/local/bin/hikifune"]

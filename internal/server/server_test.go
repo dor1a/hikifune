@@ -90,12 +90,16 @@ type fakeHost struct {
 	busyOnce bool
 	lostJobs bool
 	pruned   int
-	jobs     map[string]protocol.Job
-	jobCalls int
-	jobErrs  int // asks for a job that fail before it answers
-	requests []protocol.UpdateRequest
-	onCheck  func()
-	onStart  func(container string)
+	// pruneBusy prunes are answered 409, as while an update by hand holds
+	// the host; pruneErr answers the ones after.
+	pruneBusy int
+	pruneErr  error
+	jobs      map[string]protocol.Job
+	jobCalls  int
+	jobErrs   int // asks for a job that fail before it answers
+	requests  []protocol.UpdateRequest
+	onCheck   func()
+	onStart   func(container string)
 	// lostAnswers and lostRequests are update requests whose answer, or
 	// which themselves, are lost on the way; gatewayAnswers are taken and
 	// then answered with a 502 by something between.
@@ -172,7 +176,17 @@ func (h *fakeHost) Job(_ context.Context, id string) (protocol.Job, error) {
 	return j, nil
 }
 func (h *fakeHost) Prune(context.Context) (protocol.Pruned, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.pruned++
+	if h.pruneBusy > 0 {
+		h.pruneBusy--
+		return protocol.Pruned{}, &StatusError{Status: http.StatusConflict,
+			Body: protocol.Error{Error: "hikifune-agent update is running on this host by hand"}}
+	}
+	if h.pruneErr != nil {
+		return protocol.Pruned{}, h.pruneErr
+	}
 	return protocol.Pruned{Reclaimed: 1000}, nil
 }
 
@@ -298,7 +312,7 @@ func TestUpdateRun(t *testing.T) {
 	if e := entry(t, ha, "app-db-1"); e.Started == nil || e.Finished == nil {
 		t.Errorf("app-db-1 has no times: %+v", e)
 	}
-	if a.pruned != 1 || ha.Reclaimed != 1000 {
+	if a.pruned != 1 || ha.Reclaimed != 1000 || !ha.Pruned {
 		t.Errorf("pruned %d, reclaimed %d", a.pruned, ha.Reclaimed)
 	}
 	// The busy agent finished its own job first, then took this one.
@@ -420,6 +434,39 @@ func TestJobAskRetries(t *testing.T) {
 	run, _ := r.Run(context.Background(), KindUpdate)
 	if e := entry(t, run.Hosts[0], "web"); e.Status != "updated" || a.pruned != 1 {
 		t.Fatalf("entry %+v, pruned %d", e, a.pruned)
+	}
+}
+
+// A prune that finds the host held, as by an update by hand, is asked again
+// until the host is free (R20); another error is not.
+func TestPruneWaitsForTheHost(t *testing.T) {
+	a := newHost()
+	a.pruneBusy = 3
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	run, _ := r.Run(context.Background(), KindUpdate)
+	if h := run.Hosts[0]; a.pruned != 4 || !h.Pruned || h.Reclaimed != 1000 || h.Error != "" {
+		t.Errorf("pruned %d times: %+v", a.pruned, h)
+	}
+
+	b := newHost()
+	b.pruneErr = &StatusError{Status: http.StatusBadGateway, Body: protocol.Error{Error: "prune: no space left"}}
+	b.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	r = newRunner(t, map[string]*fakeHost{"a": b})
+	run, _ = r.Run(context.Background(), KindUpdate)
+	if h := run.Hosts[0]; b.pruned != 1 || h.Pruned || !strings.Contains(h.Error, "no space left") {
+		t.Errorf("pruned %d times: %+v", b.pruned, h)
+	}
+
+	// A run that ends while the host is held stops asking, and says it was
+	// the run that ended, with the agent's last answer.
+	c := newHost()
+	c.pruneBusy = 1 << 30
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := newRunner(t, map[string]*fakeHost{"a": c}).prune(ctx, c)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "by hand") || c.pruned < 2 {
+		t.Errorf("after %d prunes: %v", c.pruned, err)
 	}
 }
 

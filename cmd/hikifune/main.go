@@ -102,8 +102,10 @@ func runner() (*server.Runner, error) {
 		return nil, err
 	}
 	watch, err := time.ParseDuration(env("HIKIFUNE_WATCH", update.DefaultWatch.String()))
-	if err != nil || watch <= 0 {
-		return nil, fmt.Errorf("HIKIFUNE_WATCH=%q is not a duration such as 2m", os.Getenv("HIKIFUNE_WATCH"))
+	// The agent is sent whole seconds; anything else would be cut, and 0
+	// would leave the agent's own default in its place.
+	if err != nil || watch < time.Second || watch%time.Second != 0 {
+		return nil, fmt.Errorf("HIKIFUNE_WATCH=%q is not a whole number of seconds of at least 1s, such as 2m or 90s", os.Getenv("HIKIFUNE_WATCH"))
 	}
 	r := &server.Runner{Store: st, Version: buildinfo.Version, Watch: watch}
 	n, err := notifier(st)

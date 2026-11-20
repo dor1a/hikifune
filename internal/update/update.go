@@ -55,8 +55,6 @@ type Result struct {
 	// Digest is the registry digest the update went for, as its registry
 	// check saw it. A failed update skips this digest next time (R15).
 	Digest string `json:"digest,omitempty"`
-	// OldImageRemoved is set when nothing else used the old image and it was removed.
-	OldImageRemoved bool `json:"old_image_removed,omitempty"`
 	// Note reports something left behind by an update that otherwise passed.
 	Note string `json:"note,omitempty"`
 
@@ -92,7 +90,6 @@ type engine interface {
 	ContainerStop(ctx context.Context, id string) error
 	ContainerRename(ctx context.Context, id, name string) error
 	ContainerRemove(ctx context.Context, id string, force bool) error
-	ImageRemove(ctx context.Context, id string) error
 	ImagePlatformID(ctx context.Context, ref string) (string, bool, error)
 }
 
@@ -160,7 +157,9 @@ func run(ctx context.Context, e engine, name string, opt Options) Result {
 		return rollback(ctx, e, r, name, old.ID, newID, why)
 	}
 
-	// 7. Remove the old container, and its image when no name is left on it.
+	// 7. Remove the old container. Its image, which lost its name to the
+	// pull, is left for the prune after the run (R20), which removes it
+	// once nothing uses it and measures the space it frees.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepTimeout)
 	defer cancel()
 	r.Outcome = Updated
@@ -171,26 +170,9 @@ func run(ctx context.Context, e engine, name string, opt Options) Result {
 		r.addNote("the old container " + name + oldSuffix + " was left: " + err.Error())
 		return r
 	}
-	// Removing an image by ID takes its last name with it, so an image
-	// another name still points at stays. The API has no remove-if-unnamed,
-	// so a name added between this inspect and the removal is lost.
-	switch img, err := e.ImageInspect(ctx, old.Image); {
-	case docker.IsNotFound(err):
-		return r
-	case err != nil:
-		r.addNote("the old image was left: " + err.Error())
-		return r
-	case len(img.RepoTags) > 0:
+	// A prune leaves an image another name still points at.
+	if img, err := e.ImageInspect(ctx, old.Image); err == nil && len(img.RepoTags) > 0 {
 		r.addNote("the old image was kept: it is still named " + strings.Join(img.RepoTags, ", "))
-		return r
-	}
-	switch err := e.ImageRemove(ctx, old.Image); {
-	case err == nil:
-		r.OldImageRemoved = true
-	case docker.IsConflict(err) || docker.IsNotFound(err):
-		// Another container still uses it.
-	default:
-		r.addNote("the old image was left: " + err.Error())
 	}
 	return r
 }

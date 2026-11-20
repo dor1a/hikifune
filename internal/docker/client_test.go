@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +12,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNewHosts(t *testing.T) {
@@ -417,17 +420,6 @@ func TestImagePull(t *testing.T) {
 	}
 }
 
-func TestImageRemoveConflict(t *testing.T) {
-	c, calls := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		io.WriteString(w, `{"message":"image is being used by stopped container"}`)
-	})
-	err := c.ImageRemove(context.Background(), "sha256:old")
-	if !IsConflict(err) || (*calls)[0].method != "DELETE" || (*calls)[0].path != "/v1.43/images/sha256:old" {
-		t.Fatalf("err = %v, calls %+v", err, *calls)
-	}
-}
-
 // The Engine API never redirects; a redirect is not followed, so a pull's
 // credentials never go to another host.
 func TestRedirectsAreNotFollowed(t *testing.T) {
@@ -447,15 +439,80 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 	}
 }
 
+// A disk usage report that hangs leaves the prune its own time: the report
+// is given up after diskUsageLimit, and the daemon's count is used.
+func TestImagesPruneOutlastsASlowDiskUsageReport(t *testing.T) {
+	old := diskUsageLimit
+	diskUsageLimit = 50 * time.Millisecond
+	defer func() { diskUsageLimit = old }()
+	// The hung handlers outlive their requests, so they only count.
+	var pruned atomic.Int32
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1.43/system/df" {
+			<-r.Context().Done()
+			return
+		}
+		pruned.Add(1)
+		io.WriteString(w, `{"SpaceReclaimed":7}`)
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	n, err := c.ImagesPrune(ctx)
+	if err != nil || n != 7 || pruned.Load() != 1 {
+		t.Fatalf("reclaimed %d, %v, %d prunes", n, err, pruned.Load())
+	}
+}
+
+// The space reclaimed is the larger of what the daemon reports and how much
+// the image layers shrank: Docker 24 reports 0 for what it removed.
 func TestImagesPrune(t *testing.T) {
-	c, calls := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"ImagesDeleted":[{"Deleted":"sha256:1"}],"SpaceReclaimed":5000000}`)
-	})
-	n, err := c.ImagesPrune(context.Background())
-	got := (*calls)[0]
-	if err != nil || n != 5000000 || got.method != "POST" || got.path != "/v1.43/images/prune" ||
-		got.query != "filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D" {
-		t.Fatalf("reclaimed %d, %v, call %+v", n, err, got)
+	for _, tt := range []struct {
+		name                  string
+		reported, before, now int64
+		dfFails, noLayers     bool
+		want                  int64
+	}{
+		{"the daemon's count", 5000000, 30000000, 27000000, false, false, 5000000},
+		{"Docker 24 reports 0", 0, 24110000, 14110000, false, false, 10000000},
+		{"no disk usage report", 5000000, 0, 0, true, false, 5000000},
+		// A report without LayersSize after the prune is not a drop to 0.
+		{"no LayersSize after", 5000000, 30000000, 0, false, true, 5000000},
+	} {
+		dfs := 0
+		c, calls := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1.43/system/df" {
+				if tt.dfFails {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				size := tt.before
+				if dfs++; dfs > 1 {
+					if tt.noLayers {
+						io.WriteString(w, `{"Images":[]}`)
+						return
+					}
+					size = tt.now
+				}
+				fmt.Fprintf(w, `{"LayersSize":%d,"Images":[]}`, size)
+				return
+			}
+			fmt.Fprintf(w, `{"ImagesDeleted":[{"Deleted":"sha256:1"}],"SpaceReclaimed":%d}`, tt.reported)
+		})
+		n, err := c.ImagesPrune(context.Background())
+		if err != nil || n != tt.want {
+			t.Errorf("%s: reclaimed %d, %v, want %d", tt.name, n, err, tt.want)
+		}
+		var prune *call
+		for i, got := range *calls {
+			if got.path == "/v1.43/images/prune" {
+				prune = &(*calls)[i]
+			} else if got.path != "/v1.43/system/df" || got.query != "type=image" {
+				t.Errorf("%s: call %+v", tt.name, got)
+			}
+		}
+		if prune == nil || prune.method != "POST" || prune.query != "filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D" {
+			t.Errorf("%s: prune call %+v", tt.name, prune)
+		}
 	}
 }
 

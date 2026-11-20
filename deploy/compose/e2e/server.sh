@@ -19,12 +19,16 @@ image() {
 }
 
 # SIGKILL stops these at once, so the tests do not wait out the stop timeout.
+# Each image and version gets a layer of its own, so the build cache does
+# not make the same image of two names, and pruning an old one after an
+# update frees space the run can report (R20).
 for v in 1 2; do
   for name in srvdb srvweb srvguard hikifune-agent; do
     image "$name" "$v" <<EOF
 FROM $BASE
 STOPSIGNAL SIGKILL
 CMD ["sleep", "1d"]
+RUN head -c 1000000 /dev/urandom > /$name-$v
 LABEL version=$v
 EOF
   done

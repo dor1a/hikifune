@@ -601,19 +601,48 @@ func readPullStream(r io.Reader) error {
 	}
 }
 
-// ImageRemove removes an image by ID or reference without force, so an
-// image that a container uses or several references name stays (a 409).
-func (c *Client) ImageRemove(ctx context.Context, id string) error {
-	return c.do(ctx, request{method: http.MethodDelete, path: "/images/" + url.PathEscape(id)})
-}
-
 // ImagesPrune removes dangling images, the ones no tag names and no
-// container uses, and returns the space it reclaimed in bytes.
+// container uses, and returns the space it reclaimed in bytes, the larger of
+// what the daemon reports and how much the images' layers shrank. Docker 24
+// reports 0 for what it removed; with the containerd store it reports the
+// unpacked layers but not the downloaded blobs.
 func (c *Client) ImagesPrune(ctx context.Context) (int64, error) {
+	before, beforeErr := c.imageLayersSize(ctx)
 	var out struct {
 		SpaceReclaimed int64 `json:"SpaceReclaimed"`
 	}
 	err := c.do(ctx, request{method: http.MethodPost, path: "/images/prune",
 		query: url.Values{"filters": {`{"dangling":["true"]}`}}, out: &out})
-	return out.SpaceReclaimed, err
+	if err != nil {
+		return 0, err
+	}
+	reclaimed := out.SpaceReclaimed
+	if beforeErr == nil {
+		if after, err := c.imageLayersSize(ctx); err == nil {
+			reclaimed = max(reclaimed, before-after)
+		}
+	}
+	return reclaimed, nil
+}
+
+// diskUsageLimit bounds each disk usage report, so a slow one cannot use up
+// the time the prune itself was given.
+var diskUsageLimit = time.Minute
+
+// imageLayersSize is the size of the layers of all images, from the disk
+// usage report limited to images (API 1.42).
+func (c *Client) imageLayersSize(ctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, diskUsageLimit)
+	defer cancel()
+	var out struct {
+		LayersSize *int64 `json:"LayersSize"`
+	}
+	if err := c.do(ctx, request{method: http.MethodGet, path: "/system/df", query: url.Values{"type": {"image"}}, out: &out}); err != nil {
+		return 0, err
+	}
+	// A report without it is not a size of 0.
+	if out.LayersSize == nil {
+		return 0, errors.New("the disk usage report has no LayersSize")
+	}
+	return *out.LayersSize, nil
 }

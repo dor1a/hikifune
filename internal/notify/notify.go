@@ -109,7 +109,7 @@ func Build(run store.Run) []Message {
 				m.RolledBack = append(m.RolledBack, it)
 			}
 		}
-		if h.Reclaimed > 0 {
+		if h.Pruned || h.Reclaimed > 0 {
 			m.Reclaimed = humanBytes(h.Reclaimed)
 		}
 		if !m.Empty() {

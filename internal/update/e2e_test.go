@@ -108,8 +108,14 @@ func mustUpdate(ctx context.Context, t *testing.T, c *docker.Client, opt Options
 	if !after.State.Running {
 		t.Errorf("%s: not running after the update: %+v", name, after.State)
 	}
-	if !r.OldImageRemoved {
-		t.Errorf("%s: the old image was kept (%s)", name, r.Note)
+	// The old image waits, nameless, for the prune after the run (R20):
+	// nothing in this package prunes, so it must still be there.
+	if img, err := c.ImageInspect(ctx, before.Image); docker.IsNotFound(err) {
+		t.Errorf("%s: the old image %s is gone before any prune: %v", name, before.Image, err)
+	} else if err != nil {
+		t.Errorf("%s: inspect the old image %s: %v", name, before.Image, err)
+	} else if len(img.RepoTags) > 0 {
+		t.Errorf("%s: the old image is still named %v (%s)", name, img.RepoTags, r.Note)
 	}
 	noLeftovers(ctx, t, c, name)
 	return before, after

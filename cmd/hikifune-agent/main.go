@@ -207,11 +207,25 @@ func runUpdate(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	res := update.Container(ctx, d, fs.Arg(0), update.Options{Watch: *watch, Auth: pullAuth(reg, keys), Check: reg.Check})
+	// The old image goes as after a run (R20), still under the host lock,
+	// and before anything is printed, which could fail.
+	var pruneErr error
+	if res.Outcome == update.Updated {
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		defer cancel()
+		var n int64
+		if n, pruneErr = d.ImagesPrune(pctx); pruneErr == nil {
+			fmt.Fprintf(os.Stderr, "pruned dangling images: %d bytes reclaimed\n", n)
+		}
+	}
 	if err := printJSON(res); err != nil {
 		return err
 	}
-	if res.Outcome == update.Failed || res.Outcome == update.RolledBack {
+	switch {
+	case res.Outcome == update.Failed || res.Outcome == update.RolledBack:
 		return fmt.Errorf("%s: %s", res.Outcome, res.Reason)
+	case pruneErr != nil:
+		return fmt.Errorf("updated, but the prune failed: %w", pruneErr)
 	}
 	return nil
 }
