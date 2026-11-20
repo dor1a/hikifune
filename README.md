@@ -50,7 +50,7 @@ Each agent asks the registries itself, so a private registry's credentials stay 
 
 ## Install
 
-The files are in [deploy/compose](deploy/compose). The examples use the 0.1.0 images, `ghcr.io/dor1a/hikifune:0.1.0` and `ghcr.io/dor1a/hikifune-agent:0.1.0`.
+The files are in [deploy/compose](deploy/compose). The examples use the 0.1.1 images, `ghcr.io/dor1a/hikifune:0.1.1` and `ghcr.io/dor1a/hikifune-agent:0.1.1`. The server and its agents must run the same version, so update them together.
 
 ### 1. The server
 
@@ -58,8 +58,8 @@ On the host that runs the server:
 
 ```sh
 mkdir hikifune && cd hikifune
-curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/server/compose.yaml
-curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/server/.env.example
+curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.1/deploy/compose/server/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.1/deploy/compose/server/.env.example
 ```
 
 In `.env`, set at least:
@@ -89,8 +89,8 @@ It prints `HIKIFUNE_AGENT_TOKEN=...` once. On that host:
 
 ```sh
 mkdir hikifune-agent && cd hikifune-agent
-curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/agent/compose.yaml
-curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.0/deploy/compose/agent/.env.example
+curl -fsSLO https://raw.githubusercontent.com/dor1a/hikifune/v0.1.1/deploy/compose/agent/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/dor1a/hikifune/v0.1.1/deploy/compose/agent/.env.example
 ```
 
 Put the token in `.env`, and start the agent with its socket proxy:
