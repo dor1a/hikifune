@@ -327,7 +327,7 @@ func TestPost(t *testing.T) {
 	}
 	e := p.Embeds[0]
 	if e.Title != "Check run" || e.Color != colorAvailable || e.Footer == nil || e.Footer.Text != "check run" ||
-		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != strings.Repeat("─", 30)+"\n🖥 **a**\n"+strings.Repeat("─", 30)+"\n\n🆕 **Available:**\n• **web** `web:1`" {
+		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "\u200b\n"+strings.Repeat("─", 30)+"\n🖥 **a**\n"+strings.Repeat("─", 30)+"\n\n🆕 **Available:**\n• **web** `web:1`" {
 		t.Errorf("embed %+v", e)
 	}
 }
@@ -627,7 +627,7 @@ func TestARunSharesAMessage(t *testing.T) {
 	r := strings.Repeat("─", 30)
 	head := func(h string) string { return r + "\n🖥 **" + h + "**\n" + r + "\n\n" }
 	if e.Title != "Update run" || e.Color != colorBad || e.Footer.Text != "update run" ||
-		!strings.HasPrefix(e.Description, head("a")+"✅ **Updated:**") ||
+		!strings.HasPrefix(e.Description, "\u200b\n"+head("a")+"✅ **Updated:**") ||
 		!strings.Contains(e.Description, "`web:1`\n\n"+head("b")+"🔁 **Rolled back:**") || strings.Contains(e.Description, "**c**") {
 		t.Errorf("embed %+v", e)
 	}
@@ -657,7 +657,7 @@ func TestASharedMessageGoesInParts(t *testing.T) {
 	}
 	all := ""
 	for i, e := range es {
-		if utf8.RuneCountInString(e.Description) > MaxDescription || !strings.HasPrefix(e.Description, strings.Repeat("─", 30)+"\n🖥 **") ||
+		if utf8.RuneCountInString(e.Description) > MaxDescription || !strings.HasPrefix(e.Description, "\u200b\n") ||
 			e.Title != fmt.Sprintf("Update run (%d/%d)", i+1, len(es)) {
 			t.Errorf("part %d: title %q, %d characters", i, e.Title, utf8.RuneCountInString(e.Description))
 		}
@@ -668,7 +668,7 @@ func TestASharedMessageGoesInParts(t *testing.T) {
 			t.Errorf("host %s heads %d parts", h, n)
 		}
 	}
-	if !strings.Contains(es[0].Description, "🖥 **b**") || !strings.HasPrefix(es[1].Description, strings.Repeat("─", 30)+"\n🖥 **c**") ||
+	if !strings.Contains(es[0].Description, "🖥 **b**") || !strings.HasPrefix(es[1].Description, "\u200b\n"+strings.Repeat("─", 30)+"\n🖥 **c**") ||
 		es[0].Host != "a, b" || es[1].Host != "c" {
 		t.Errorf("a and b share the first part and c starts the second: %q, %q", es[0].Host, es[1].Host)
 	}
@@ -682,9 +682,9 @@ func TestASharedMessageGoesInParts(t *testing.T) {
 			t.Fatalf("%d: %d embeds, %v", size, len(es), err)
 		}
 		for i, e := range es {
-			head := r + "\n🖥 **node-a**\n" + r + "\n\n⚠️ **Left out:** x"
+			head := "\u200b\n" + r + "\n🖥 **node-a**\n" + r + "\n\n⚠️ **Left out:** x"
 			if i > 0 {
-				head = r + "\n🖥 **node-a** (continued)\n" + r + "\n\nx"
+				head = "\u200b\n" + r + "\n🖥 **node-a** (continued)\n" + r + "\n\nx"
 			}
 			if !strings.HasPrefix(e.Description, head) || utf8.RuneCountInString(e.Description) > MaxDescription {
 				t.Errorf("%d, part %d: %d characters, starts %q", size, i, utf8.RuneCountInString(e.Description), e.Description[:min(len(e.Description), 120)])
@@ -695,11 +695,11 @@ func TestASharedMessageGoesInParts(t *testing.T) {
 	// fits under it is not cut early.
 	head := func(h, more string) string { return rule + "\n🖥 **" + h + "**" + more + "\n" + rule + "\n\n" }
 	prefix := "⚠️ **Left out:** "
-	fit := MaxDescription - utf8.RuneCountInString(head("node-a", "")+prefix) - 1
+	fit := MaxDescription - utf8.RuneCountInString(blankTop+head("node-a", "")+prefix) - 1
 	m := Message{Host: "node-a", Kind: "check", LeftOut: strings.Repeat("x", fit), Note: strings.Repeat("y", 100)}
 	if es, _, err := Shared(defaultTemplate(), []Message{m}); err != nil || len(es) != 2 ||
-		es[0].Description != head("node-a", "")+prefix+strings.Repeat("x", fit) ||
-		es[1].Description != head("node-a", " (continued)")+strings.Repeat("y", 100) {
+		es[0].Description != blankTop+head("node-a", "")+prefix+strings.Repeat("x", fit) ||
+		es[1].Description != blankTop+head("node-a", " (continued)")+strings.Repeat("y", 100) {
 		t.Errorf("a line that fits the first part: %d embeds, %v", len(es), err)
 	}
 	// A name of any length leaves room for the text under it.
