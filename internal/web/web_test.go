@@ -45,9 +45,17 @@ func (f *fakeRunner) Active() *server.Activity {
 	return f.active
 }
 
-type fakeSchedule struct{ check, update server.When }
+type fakeSchedule struct {
+	check, update server.When
+	planned       map[string]server.Planned
+}
 
 func (f fakeSchedule) Times() (server.When, server.When) { return f.check, f.update }
+
+func (f fakeSchedule) Planned(kind string) (server.Planned, bool) {
+	p, ok := f.planned[kind]
+	return p, ok
+}
 
 func (f fakeSchedule) TimesFor(set store.Settings) (server.When, server.When) {
 	return server.Saved(set, f.check, f.update)
@@ -90,7 +98,7 @@ func newServer(t *testing.T, st store.Store, r Runner, a *auth.Auth) (*Server, c
 	t.Helper()
 	wake := make(chan struct{}, 1)
 	check, upd := server.When{At: server.Clock{Hour: 0, Minute: 0}}, server.When{At: server.Clock{Hour: 1, Minute: 0}}
-	s, err := New(Config{Store: st, Runner: r, Schedule: fakeSchedule{check, upd}, Wake: wake,
+	s, err := New(Config{Store: st, Runner: r, Schedule: fakeSchedule{check: check, update: upd}, Wake: wake,
 		Location: time.UTC, DefaultCheck: check, DefaultUpdate: upd, Watch: 2 * time.Minute,
 		Auth: a, Version: "v1",
 		Status: func(_ context.Context, a store.Agent) (protocol.Version, error) {
@@ -123,14 +131,14 @@ func do(t *testing.T, h http.Handler, method, target string, form url.Values) (*
 
 func TestContainersShowsEveryContainer(t *testing.T) {
 	s, _ := newServer(t, fixture(t), &fakeRunner{}, nil)
-	res, body := do(t, s.Handler(), "GET", "/", nil)
+	res, body := do(t, s.Handler(), "GET", "/containers", nil)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", res.StatusCode)
 	}
 	for _, want := range []string{
 		">web<", ">guard ", ">db<", ">hikifune-agent ", ">job<",
 		// The update by hand is newer than the check.
-		`class="badge good">updated`,
+		`class="badge good">Updated`,
 		// Protected and hikifune itself are marked.
 		`title="hikifune.protected`, `<span class="tag">hikifune</span>`,
 		// Update now asks first for a protected container.
@@ -157,7 +165,7 @@ func TestContainersShowsEveryContainer(t *testing.T) {
 		}
 	}
 	// One list: a single table with the host column.
-	if _, body := do(t, s.Handler(), "GET", "/?view=list", nil); strings.Count(body, "<table") != 1 || !strings.Contains(body, "<th>Host</th>") ||
+	if _, body := do(t, s.Handler(), "GET", "/containers?view=list", nil); strings.Count(body, "<table") != 1 || !strings.Contains(body, "<th>Host</th>") ||
 		!strings.Contains(body, "b: the agent runs v0") {
 		t.Errorf("one list: %d tables", strings.Count(body, "<table"))
 	}
@@ -170,9 +178,9 @@ func TestContainersFilters(t *testing.T) {
 	s, _ := newServer(t, fixture(t), &fakeRunner{}, nil)
 	h := s.Handler()
 	for q, want := range map[string]string{
-		"/?status=up_to_date": "1 of 5", "/?protected=1": "1 of 5", "/?q=POSTGRES": "1 of 5", "/?host=b": "0 of 5",
+		"/containers?status=up_to_date": "1 of 5", "/containers?protected=1": "1 of 5", "/containers?q=POSTGRES": "1 of 5", "/containers?host=b": "0 of 5",
 		// Every container whose newer digest is not on it yet.
-		"/?status=update_available": "3 of 5", "/?status=update_available&view=list": "3 of 5",
+		"/containers?status=update_available": "3 of 5", "/containers?status=update_available&view=list": "3 of 5",
 	} {
 		if _, body := do(t, h, "GET", q, nil); !strings.Contains(body, want+" containers") {
 			t.Errorf("%s: no %q", q, want)
@@ -183,14 +191,14 @@ func TestContainersFilters(t *testing.T) {
 func TestEmptyStates(t *testing.T) {
 	st, _ := store.OpenJSON(t.TempDir(), 0)
 	s, _ := newServer(t, st, &fakeRunner{}, nil)
-	if _, body := do(t, s.Handler(), "GET", "/", nil); !strings.Contains(body, "hikifune agent add") {
+	if _, body := do(t, s.Handler(), "GET", "/containers", nil); !strings.Contains(body, "hikifune agent add") {
 		t.Error("no agents: no hint")
 	}
 	st.Update(func(s *store.State) error {
 		s.Agents = []store.Agent{{Name: "a", URL: "http://a:7778"}}
 		return nil
 	})
-	if _, body := do(t, s.Handler(), "GET", "/", nil); !strings.Contains(body, "No check has run yet") {
+	if _, body := do(t, s.Handler(), "GET", "/containers", nil); !strings.Contains(body, "No check has run yet") {
 		t.Error("no runs: no hint")
 	}
 }
@@ -221,6 +229,40 @@ func TestActions(t *testing.T) {
 	if _, body := do(t, h, "POST", "/actions/check", url.Values{}); !strings.Contains(body, "Another run is going on") {
 		t.Errorf("busy: %s", body)
 	}
+	// Refused while a run shows in the menu, it says so under the run.
+	r.active = &server.Activity{Spec: server.Spec{Kind: "check", Manual: "alice"}, Started: t0}
+	if _, body := do(t, h, "POST", "/actions/check", url.Values{}); !strings.Contains(body, "Another run is going on") ||
+		!strings.Contains(body, "started by alice") || !strings.Contains(body, "every 2s") {
+		t.Errorf("busy with a run shown: %s", body)
+	}
+	r.active = nil
+	// Idle, the menu asks now and then with the latest run it has shown, so
+	// a run started elsewhere shows, even one that ended between two asks.
+	if _, body := do(t, h, "GET", "/runs", nil); !strings.Contains(body, `hx-get="/activity?seen=r2&amp;page=runs" hx-trigger="every 10s"`) {
+		t.Errorf("idle menu: %s", body)
+	}
+	if res, _ := do(t, h, "GET", "/activity?seen=r2&page=runs", nil); res.Header.Get("HX-Refresh") != "" {
+		t.Error("reloaded with no new run")
+	}
+	if res, _ := do(t, h, "GET", "/activity?seen=r1&page=runs", nil); res.Header.Get("HX-Refresh") != "true" {
+		t.Error("a run that ended between two asks did not reload the page")
+	}
+	// Settings does not reload, which would drop the edits: it says so and
+	// keeps asking with what it saw, so the note stays.
+	if res, body := do(t, h, "GET", "/activity?seen=r1&page=settings", nil); res.Header.Get("HX-Refresh") != "" ||
+		!strings.Contains(body, "A run ended.") || !strings.Contains(body, "seen=r1&amp;page=settings") {
+		t.Errorf("settings: %v\n%s", res.Header, body)
+	}
+	// A host removed since the page was drawn is not run.
+	if _, body := do(t, h, "POST", "/actions/check", url.Values{"host": {"gone"}}); !strings.Contains(body, "There is no host named gone now") {
+		t.Errorf("a removed host: %s", body)
+	}
+	// A scheduled run says so where a run by hand names who started it.
+	r.active = &server.Activity{Spec: server.Spec{Kind: "update"}, Started: t0}
+	if _, body := do(t, h, "GET", "/activity", nil); !strings.Contains(body, "on schedule, since") {
+		t.Errorf("scheduled run: %s", body)
+	}
+	r.active = nil
 	if res, _ := do(t, h, "POST", "/actions/update", url.Values{"host": {"a"}}); res.StatusCode != http.StatusBadRequest {
 		t.Errorf("update without a container: %d", res.StatusCode)
 	}
@@ -237,8 +279,8 @@ func TestSettings(t *testing.T) {
 	h := s.Handler()
 	_, body := do(t, h, "GET", "/settings", nil)
 	if !strings.Contains(body, "From the environment: check every day at 00:00, update every day at 01:00") ||
-		!strings.Contains(body, `<option value="day" selected>every day</option>`) ||
-		!strings.Contains(body, `<span class="when-field" data-for="week" hidden>`) || !strings.Contains(body, `<option value="sat">Saturday</option>`) {
+		!strings.Contains(body, `<option value="day" selected>Every day</option>`) ||
+		!strings.Contains(body, `<span class="when-field off" data-for="week">`) || !strings.Contains(body, `<option value="sat">Saturday</option>`) {
 		t.Errorf("settings page: %s", body)
 	}
 	st.Update(func(s *store.State) error {
@@ -269,12 +311,22 @@ func TestSettings(t *testing.T) {
 		"check_period": {"week"}, "check_weekday": {"sun"}, "update_period": {"month"}, "update_day": {"last day"}})
 	// The saved period's field shows; the other stays hidden.
 	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<span class="when-field" data-for="week"><span class="muted">on</span>`) ||
-		!strings.Contains(body, `<option value="sun" selected>Sunday</option>`) || !strings.Contains(body, `name="update_day" value="last day"`) {
+		!strings.Contains(body, `<option value="sun" selected>Sunday</option>`) || !strings.Contains(body, `name="update_day" value="Last day"`) {
 		t.Errorf("saved schedule not shown")
 	}
-	if res, body := do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"}, "update_period": {"month"}, "update_day": {"40"}}); res.StatusCode != http.StatusUnprocessableEntity ||
-		!strings.Contains(body, `value="40"`) {
-		t.Errorf("day 40: %d", res.StatusCode)
+	// A day past 30 is the last day, as the page's script shows it.
+	if res, _ := do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"},
+		"check_period": {"week"}, "check_weekday": {"sun"}, "update_period": {"month"}, "update_day": {"45"}}); res.StatusCode != http.StatusSeeOther {
+		t.Errorf("day 45: %d", res.StatusCode)
+	}
+	if got, _ := st.Read(); got.Settings.UpdateEvery != "last" {
+		t.Errorf("day 45 saved as %q", got.Settings.UpdateEvery)
+	}
+	for _, day := range []string{"0", "abc", "12x", "-3", "+1", "+31", "Lasting"} {
+		if res, body := do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"}, "update_period": {"month"}, "update_day": {day}}); res.StatusCode != http.StatusUnprocessableEntity ||
+			!strings.Contains(body, `value="`+strings.ReplaceAll(day, "+", "&#43;")+`"`) {
+			t.Errorf("day %q: %d", day, res.StatusCode)
+		}
 	}
 	select {
 	case <-wake:
@@ -315,7 +367,7 @@ func TestNotificationSettings(t *testing.T) {
 
 	s.cfg.Notifier = &notify.Notifier{Discord: &notify.Discord{URL: hook.URL + "/api/webhooks/42/secret-token"}}
 	_, body := do(t, h, "GET", "/settings", nil)
-	if !strings.Contains(body, "/api/webhooks/42/…") || strings.Contains(body, "secret-token") || !strings.Contains(body, `<span class="tag">default</span>`) {
+	if !strings.Contains(body, "/api/webhooks/42/…") || strings.Contains(body, "secret-token") || !strings.Contains(body, `<span class="tag">Default</span>`) {
 		t.Errorf("settings page: webhook or default not shown right")
 	}
 	if res, body := do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Nope}}"}}); res.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "Nope") {
@@ -329,10 +381,31 @@ func TestNotificationSettings(t *testing.T) {
 		t.Errorf("send test: %s", body)
 	}
 	mu.Lock()
-	if len(posts) != 1 || !strings.Contains(posts[0], `"description":"test example-host"`) {
+	// By default the hosts of a run share a message, so the test sends two
+	// sample hosts in one.
+	if len(posts) != 1 || !strings.Contains(posts[0], `"description":"test example-host"`) ||
+		!strings.Contains(posts[0], `"description":"test example-host-2"`) {
 		t.Errorf("posts %v", posts)
 	}
+	posts = nil
 	mu.Unlock()
+	if _, body := do(t, h, "POST", "/settings/template/test", url.Values{"template": {"test {{.Host}}"}, "messages": {"host"}}); !strings.Contains(body, "Sent a sample message for example-host.") {
+		t.Errorf("send test per host: %s", body)
+	}
+	mu.Lock()
+	if len(posts) != 1 || strings.Contains(posts[0], "example-host-2") {
+		t.Errorf("posts per host %v", posts)
+	}
+	mu.Unlock()
+	// The choice is saved with the template, and shown again.
+	do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Kind}} on {{.Host}}"}, "messages": {"host"}})
+	if got, _ := st.Read(); !got.Settings.MessagePerHost {
+		t.Error("one message per host was not saved")
+	}
+	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<option value="host" selected>One per host</option>`) {
+		t.Error("one message per host not shown")
+	}
+	do(t, h, "POST", "/settings/template", url.Values{"template": {"{{.Kind}} on {{.Host}}"}, "messages": {"run"}})
 	// Saving the default, or asking for it, keeps the template empty.
 	do(t, h, "POST", "/settings/template", url.Values{"template": {notify.Default}})
 	if got, _ := st.Read(); got.Settings.Template != "" {
@@ -345,7 +418,7 @@ func TestHosts(t *testing.T) {
 	s, _ := newServer(t, st, &fakeRunner{}, nil)
 	h := s.Handler()
 	_, body := do(t, h, "GET", "/hosts", nil)
-	for _, want := range []string{`hx-get="/hosts/a/status"`, "5 containers, 3 with an update", `<span class="tag">check only</span>`} {
+	for _, want := range []string{`hx-get="/hosts/a/status"`, "5 containers, 3 with an update", `<span class="tag warn">Check only</span>`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("hosts page has no %q", want)
 		}
@@ -496,7 +569,7 @@ func TestRuns(t *testing.T) {
 	h := s.Handler()
 	_, body := do(t, h, "GET", "/runs", nil)
 	if !strings.Contains(body, `href="/runs/r2"`) || strings.Index(body, "/runs/r2") > strings.Index(body, "/runs/r1") ||
-		!strings.Contains(body, "update of web") || !strings.Contains(body, "by alice") || !strings.Contains(body, "1 host left out") {
+		!strings.Contains(body, "Update of web") || !strings.Contains(body, "By alice") || !strings.Contains(body, "1 host left out") {
 		t.Errorf("runs page: %s", body)
 	}
 	_, body = do(t, h, "GET", "/runs/r1", nil)
@@ -558,5 +631,18 @@ func TestCrossSitePost(t *testing.T) {
 	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden || len(r.specs) != 0 {
 		t.Fatalf("cross-site post: %d, specs %+v", rec.Code, r.specs)
+	}
+}
+
+// Any number past 30, however long, is the last day; the rest is left for
+// ParseEvery to accept or refuse.
+func TestLastDay(t *testing.T) {
+	for in, want := range map[string]string{
+		"45": "last", "100": "last", "0301": "last", "99999999999999999999": "last", " 31 ": "last",
+		"30": "30", "030": "030", "7": "7", "0": "0", "00": "00", "abc": "abc", "12x": "12x", "": "", "last day": "last day",
+	} {
+		if got := lastDay(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
 	}
 }

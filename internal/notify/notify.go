@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -67,13 +68,33 @@ const (
 	colorQuiet     = 0x5B6283
 )
 
-func (m Message) color() int {
+// Tones of a message, the worst result in it, which picks its color.
+const (
+	ToneBad       = "bad"
+	ToneUpdated   = "updated"
+	ToneAvailable = "available"
+	ToneQuiet     = "quiet"
+)
+
+func (m Message) tone() string {
 	switch {
 	case m.LeftOut != "" || m.Note != "" || len(m.RolledBack) > 0 || len(m.Failed) > 0:
-		return colorBad
+		return ToneBad
 	case len(m.Updated) > 0:
-		return colorUpdated
+		return ToneUpdated
 	case len(m.Available) > 0:
+		return ToneAvailable
+	}
+	return ToneQuiet
+}
+
+func (m Message) color() int {
+	switch m.tone() {
+	case ToneBad:
+		return colorBad
+	case ToneUpdated:
+		return colorUpdated
+	case ToneAvailable:
 		return colorAvailable
 	}
 	return colorQuiet
@@ -121,27 +142,30 @@ func Build(run store.Run) []Message {
 
 // Default is the template hikifune ships, the layout of the messages it
 // replaces.
-const Default = `{{define "items"}}{{range .}}• ` + "`{{.Container}}`" + ` {{md .Image}}{{if .Protected}} (protected){{end}}{{if .Self}} (hikifune){{end}}{{with .Reason}}
+//
+// The image goes in a code span as it is: an image reference holds no
+// backtick, and an escape would show inside the span.
+const Default = `{{define "items"}}{{range .}}• **{{md .Container}}**{{with .Image}} ` + "`{{.}}`" + `{{end}}{{if .Protected}} (protected){{end}}{{if .Self}} (hikifune){{end}}{{with .Reason}}
   {{md .}}{{end}}
 {{end}}{{end}}
-{{- with .LeftOut}}Left out: {{md .}}
+{{- with .LeftOut}}⚠️ **Left out:** {{md .}}
 
 {{end}}
-{{- with .Available}}**Available**
+{{- with .Available}}🆕 **Available:**
 {{template "items" .}}
 {{end}}
-{{- with .Updated}}**Updated**
+{{- with .Updated}}✅ **Updated:**
 {{template "items" .}}
 {{end}}
-{{- with .RolledBack}}**Rolled back**
+{{- with .RolledBack}}🔁 **Rolled back:**
 {{template "items" .}}
 {{end}}
-{{- with .Failed}}**Failed**
+{{- with .Failed}}❌ **Failed:**
 {{template "items" .}}
-{{end}}
-{{- with .Reclaimed}}Reclaimed {{.}}
 {{end}}
 {{- with .Note}}{{md .}}
+{{end}}
+{{- with .Reclaimed}}Total reclaimed space: {{.}}
 {{end}}`
 
 // Limits on a template, which is kept in the state and run for every
@@ -179,9 +203,35 @@ var defaultTemplate = sync.OnceValue(func() *template.Template {
 	return t
 })
 
-// Parse reads a template; an empty one is Default. It renders a message of
-// each kind, to catch errors that only show when the template runs.
+// Parse reads a template to save; an empty one is Default. On top of Load,
+// it renders a message of each kind, to catch errors that only show when the
+// template runs.
 func Parse(text string) (*template.Template, error) {
+	t, err := Load(text)
+	if err != nil {
+		return nil, err
+	}
+	// The messages checked are the ones the preview shows, the second host
+	// of a run included, so a template that fails in the preview is never
+	// saved.
+	for _, k := range sampleKinds() {
+		for _, m := range SampleRun(k.Message) {
+			if _, err := Render(t, m); err != nil {
+				return nil, fmt.Errorf("for a %s on %s: %w", k.Name, m.Host, err)
+			}
+		}
+	}
+	if out, _ := Render(t, Sample()); out == "" {
+		return nil, errors.New("the template writes nothing for a message with every list filled")
+	}
+	return t, nil
+}
+
+// Load reads a saved template to send with; an empty one is Default. It
+// keeps the limits but does not render the samples again: a template saved
+// under older checks still sends, and a message it fails on gives way to
+// Default alone.
+func Load(text string) (*template.Template, error) {
 	if strings.TrimSpace(text) == "" {
 		text = Default
 	}
@@ -202,14 +252,6 @@ func Parse(text string) (*template.Template, error) {
 		if tt.Tree != nil {
 			countSteps(tt.Tree, tt.Tree.Root)
 		}
-	}
-	for _, m := range samples() {
-		if _, err := Render(t, m); err != nil {
-			return nil, fmt.Errorf("for a %s: %w", m.Host, err)
-		}
-	}
-	if out, _ := Render(t, Sample()); out == "" {
-		return nil, errors.New("the template writes nothing for a message with every list filled")
 	}
 	return t, nil
 }
@@ -493,6 +535,50 @@ func samples() []Message {
 	}
 }
 
+// SampleRun is the messages of a run with two hosts, first and a second
+// host of the same kind, for Send test and the preview when a run's hosts
+// share messages.
+func SampleRun(first Message) []Message {
+	all := Sample()
+	second := Message{Host: "example-host-2", Kind: first.Kind, At: first.At}
+	if first.Kind == "check" {
+		second.Available = all.Available
+	} else {
+		second.Updated, second.Reclaimed = all.Updated, "1.2 GB"
+	}
+	return []Message{first, second}
+}
+
+// SampleKind is one kind of message a run makes, named, for a preview.
+type SampleKind struct {
+	Name    string
+	Message Message
+}
+
+// SampleKinds are the messages a template is checked on, each under the
+// sample host name, named for the preview's options.
+func SampleKinds() []SampleKind {
+	out := sampleKinds()
+	for i, k := range out {
+		out[i].Name = strings.ToUpper(k.Name[:1]) + k.Name[1:]
+	}
+	return out
+}
+
+// sampleKinds are SampleKinds named as an error names them.
+func sampleKinds() []SampleKind {
+	var out []SampleKind
+	for i, m := range samples() {
+		name := m.Host
+		if i == 0 {
+			name = "message with every part"
+		}
+		m.Host = Sample().Host
+		out = append(out, SampleKind{Name: name, Message: m})
+	}
+	return out
+}
+
 // MaxDescription is Discord's limit for an embed description, in characters.
 const MaxDescription = 4096
 
@@ -540,45 +626,56 @@ type Notifier struct {
 	Discord *Discord
 	// Template gives the template in force; empty means Default.
 	Template func() string
-	Log      *slog.Logger
+	// PerHost, when set and true, gives each host its own message. Otherwise
+	// the hosts of a run share messages, an embed each.
+	PerHost func() bool
+	Log     *slog.Logger
 }
 
-// Run sends one message for each host of run with something to say. A
-// template that no longer parses gives way to Default, so a run is never
-// left unreported.
+// Run sends the messages of run, one for each host with something to say,
+// as Deliver groups them. A template that no longer parses gives way to
+// Default, so a run is never left unreported.
 func (n *Notifier) Run(ctx context.Context, run store.Run) error {
 	text := ""
 	if n.Template != nil {
 		text = n.Template()
 	}
-	t, err := Parse(text)
+	t, err := Load(text)
 	if err != nil {
 		n.logError("the notification template does not work; using the default", err)
 		t = defaultTemplate()
 	}
-	var errs []error
-	for _, m := range Build(run) {
-		if err := n.Send(ctx, t, m); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", m.Host, err))
-		}
-	}
-	return errors.Join(errs...)
+	return n.Deliver(ctx, t, Build(run), n.PerHost != nil && n.PerHost())
 }
 
-// Send renders one message and posts it, in parts when it is too long for
-// one embed. When the template fails on the message, or writes nothing for
-// a message with something to say, the default template writes it.
-func (n *Notifier) Send(ctx context.Context, t *template.Template, m Message) error {
+// Embed is one embed of a message as Send posts it. Tone names its Color.
+type Embed struct {
+	Host, Title, Description, Footer string
+	Color                            int
+	Tone                             string
+	At                               time.Time
+}
+
+func (e Embed) wire() embed {
+	w := embed{Title: e.Title, Description: e.Description, Color: e.Color, Footer: &footer{Text: e.Footer}}
+	if !e.At.IsZero() {
+		w.Timestamp = e.At.UTC().Format(time.RFC3339)
+	}
+	return w
+}
+
+// Embeds renders m as Send posts it, in parts when it is too long for one
+// embed. When t fails on m, or writes nothing for a message with something
+// to say, the default template writes it, and fallback says why. No embeds
+// and no error mean nothing is sent.
+func Embeds(t *template.Template, m Message) (out []Embed, fallback, err error) {
 	text, err := Render(t, m)
 	if (err != nil || text == "") && !m.Empty() && t != defaultTemplate() {
-		n.logError("the notification template failed on a message; using the default", cmp.Or(err, errors.New("it wrote nothing")))
+		fallback = cmp.Or(err, errors.New("it wrote nothing"))
 		text, err = Render(defaultTemplate(), m)
 	}
-	if err != nil {
-		return err
-	}
-	if text == "" {
-		return nil
+	if err != nil || text == "" {
+		return nil, fallback, err
 	}
 	parts := split(text, MaxDescription)
 	for i, part := range parts {
@@ -586,15 +683,86 @@ func (n *Notifier) Send(ctx context.Context, t *template.Template, m Message) er
 		if len(parts) > 1 {
 			title = fmt.Sprintf("%s (%d/%d)", m.Host, i+1, len(parts))
 		}
-		e := embed{Title: title, Description: part, Color: m.color(), Footer: &footer{Text: m.Kind + " run"}}
-		if !m.At.IsZero() {
-			e.Timestamp = m.At.UTC().Format(time.RFC3339)
+		out = append(out, Embed{Host: m.Host, Title: title, Description: part, Color: m.color(), Tone: m.tone(),
+			Footer: m.Kind + " run", At: m.At})
+	}
+	return out, fallback, nil
+}
+
+// Discord's limits on one message: how many embeds, and how many characters
+// all of them hold together.
+const (
+	maxEmbeds     = 10
+	maxEmbedChars = 6000
+)
+
+// Pack puts embeds into messages, in order, each message within Discord's
+// limits. One embed is always within them: its text is at most
+// MaxDescription characters.
+func Pack(es []Embed) [][]Embed {
+	var out [][]Embed
+	var cur []Embed
+	chars := 0
+	for _, e := range es {
+		n := utf8.RuneCountInString(e.Title) + utf8.RuneCountInString(e.Description) + utf8.RuneCountInString(e.Footer)
+		if len(cur) > 0 && (len(cur) == maxEmbeds || chars+n > maxEmbedChars) {
+			out = append(out, cur)
+			cur, chars = nil, 0
 		}
-		if err := n.Discord.Post(ctx, e); err != nil {
-			return err
+		cur = append(cur, e)
+		chars += n
+	}
+	if len(cur) > 0 {
+		out = append(out, cur)
+	}
+	return out
+}
+
+// Deliver posts msgs: each host its own message, in parts when long, when
+// perHost; otherwise all of them in as few messages as Pack makes, an embed
+// for each host. A host whose message fails to post is named in the error.
+func (n *Notifier) Deliver(ctx context.Context, t *template.Template, msgs []Message, perHost bool) error {
+	var errs []error
+	var shared []Embed
+	for _, m := range msgs {
+		es, fallback, err := Embeds(t, m)
+		if fallback != nil {
+			n.logError("the notification template failed on a message; using the default", fallback)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.Host, err))
+			continue
+		}
+		if !perHost {
+			shared = append(shared, es...)
+			continue
+		}
+		for _, e := range es {
+			if err := n.Discord.Post(ctx, e.wire()); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", m.Host, err))
+				break
+			}
 		}
 	}
-	return nil
+	for _, batch := range Pack(shared) {
+		var wire []embed
+		var hosts []string
+		for _, e := range batch {
+			wire = append(wire, e.wire())
+			if !slices.Contains(hosts, e.Host) {
+				hosts = append(hosts, e.Host)
+			}
+		}
+		if err := n.Discord.PostAll(ctx, wire); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", strings.Join(hosts, ", "), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Send posts one message as its own, as Embeds lays it out.
+func (n *Notifier) Send(ctx context.Context, t *template.Template, m Message) error {
+	return n.Deliver(ctx, t, []Message{m}, true)
 }
 
 func (n *Notifier) logError(msg string, err error) {

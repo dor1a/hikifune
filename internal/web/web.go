@@ -17,8 +17,11 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dor1a/hikifune/internal/auth"
 	"github.com/dor1a/hikifune/internal/notify"
@@ -46,6 +49,8 @@ type Runner interface {
 type Schedule interface {
 	Times() (check, update server.When)
 	TimesFor(set store.Settings) (check, update server.When)
+	// Planned is when the schedule loop will next run a kind.
+	Planned(kind string) (server.Planned, bool)
 }
 
 // Config is what the pages need.
@@ -105,8 +110,11 @@ func New(cfg Config) (*Server, error) {
 		"short":  shortDigest,
 		"status": statusClass,
 		"words":  func(s string) string { return strings.ReplaceAll(s, "_", " ") },
-		"bytes":  humanBytes,
-		"rows":   func(rows []row, host bool) rowTable { return rowTable{Rows: rows, Host: host} },
+		// sentence starts a value with a capital, as the options and the
+		// values on a page do.
+		"sentence": sentence,
+		"bytes":    humanBytes,
+		"rows":     func(rows []row, host bool) rowTable { return rowTable{Rows: rows, Host: host} },
 		"when": func(label, name string, f whenForm) whenRow {
 			return whenRow{Label: label, Name: name, Form: f, Weekdays: weekdays}
 		},
@@ -135,7 +143,9 @@ func New(cfg Config) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	static, _ := fs.Sub(staticFS, "static")
 	app := http.NewServeMux()
-	app.HandleFunc("GET /{$}", s.containers)
+	app.HandleFunc("GET /{$}", s.home)
+	app.HandleFunc("GET /home/map", s.homeMap)
+	app.HandleFunc("GET /containers", s.containers)
 	app.HandleFunc("GET /hosts", s.hosts)
 	app.HandleFunc("GET /hosts/{name}", s.host)
 	app.HandleFunc("GET /hosts/{name}/status", s.hostStatus)
@@ -146,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	app.HandleFunc("POST /settings", s.saveSettings)
 	app.HandleFunc("POST /settings/template", s.saveTemplate)
 	app.HandleFunc("POST /settings/template/test", s.testTemplate)
+	app.HandleFunc("POST /settings/template/preview", s.previewTemplate)
 	app.HandleFunc("GET /activity", s.activity)
 	app.HandleFunc("POST /actions/check", s.checkNow)
 	app.HandleFunc("POST /actions/update", s.updateNow)
@@ -199,11 +210,36 @@ type navHost struct {
 	CheckOnly bool
 }
 
-// activity is the strip under the top bar.
+// activity is Check now under the menu, or the run going on.
 type activity struct {
 	Active *server.Activity
 	Error  string
 	Notice string
+	// Seen is the latest run the page has shown, and Page the page: the
+	// menu asks with them, so a run that ended elsewhere reloads the page.
+	// On Settings, where a reload would drop the edits, Ended says so with
+	// a link instead.
+	Seen, Page string
+	Ended      bool
+}
+
+// activityOf is the menu's activity now, on page.
+func (s *Server) activityOf(page, seen string) activity {
+	a := activity{Active: s.cfg.Runner.Active(), Page: page, Seen: seen}
+	if st, err := s.cfg.Store.Read(); err == nil && len(st.Runs) > 0 {
+		a.Seen = st.Runs[len(st.Runs)-1].ID
+	}
+	return a
+}
+
+// ended tells the page that a run it did not show has ended: it reloads,
+// except on Settings, which keeps asking with what it saw so the note stays.
+func ended(w http.ResponseWriter, a *activity, seen string) {
+	if a.Page == "settings" {
+		a.Ended, a.Seen = true, seen
+		return
+	}
+	w.Header().Set("HX-Refresh", "true")
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, p page) {
@@ -221,7 +257,10 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, p page) 
 
 func (s *Server) newPage(r *http.Request, st store.State, name, title string, data any) page {
 	p := page{Page: name, Title: title, User: auth.UserFrom(r.Context()),
-		Activity: activity{Active: s.cfg.Runner.Active()}, Data: data}
+		Activity: activity{Active: s.cfg.Runner.Active(), Page: name}, Data: data}
+	if len(st.Runs) > 0 {
+		p.Activity.Seen = st.Runs[len(st.Runs)-1].ID
+	}
 	for _, hv := range view(st) {
 		n := navHost{Name: hv.Agent.Name, State: "ok", Available: hv.Available, CheckOnly: hv.Agent.CheckOnly}
 		switch {
@@ -417,13 +456,13 @@ func (s *Server) containers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	f := filter{Host: q.Get("host"), Status: q.Get("status"), Protected: q.Get("protected") == "1",
+	f := filter{Host: q.Get("host"), Status: strings.ToLower(q.Get("status")), Protected: q.Get("protected") == "1",
 		Q: strings.TrimSpace(q.Get("q"))}
 	d := containersData{Hosts: view(st), Filter: f, Statuses: statuses, List: q.Get("view") == "list"}
 	q.Del("view")
-	d.ByHostURL = "/?" + q.Encode()
+	d.ByHostURL = "/containers?" + q.Encode()
 	q.Set("view", "list")
-	d.ListURL = "/?" + q.Encode()
+	d.ListURL = "/containers?" + q.Encode()
 	for _, h := range d.Hosts {
 		d.Total += len(h.Rows)
 		if !h.AsOf.IsZero() {
@@ -619,7 +658,7 @@ type settingsData struct {
 	Saved                       bool
 	Location                    string
 	Watch                       time.Duration
-	NextCheck, NextUpdate       time.Time
+	NextCheck, NextUpdate       string
 	Error                       string
 	Done                        bool
 	// Notifications: the webhook without its token, the template in the
@@ -630,21 +669,25 @@ type settingsData struct {
 	DefaultTemplate bool
 	TemplateError   string
 	TemplateDone    bool
+	PerHost         bool
+	Preview         templatePreview
 }
 
 func (s *Server) settingsData(st store.State) settingsData {
 	check, upd := s.cfg.Schedule.Times()
-	now := s.now()
+	nextCheck, nextUpdate := s.nextRuns(check, upd)
 	d := settingsData{
 		Check: formOf(check), Update: formOf(upd),
 		DefaultCheck: s.cfg.DefaultCheck.Words(), DefaultUpdate: s.cfg.DefaultUpdate.Words(),
 		Saved: st.Settings.Saved, Location: s.cfg.Location.String(), Watch: s.cfg.Watch,
-		NextCheck: check.Next(now, s.cfg.Location), NextUpdate: upd.Next(now, s.cfg.Location),
+		NextCheck: s.whenNext(nextCheck), NextUpdate: s.whenNext(nextUpdate),
 		Template: cmp.Or(st.Settings.Template, notify.Default), DefaultTemplate: st.Settings.Template == "",
 	}
 	if n := s.cfg.Notifier; n != nil && n.Discord != nil {
 		d.Webhook, d.Avatar = notify.Redact(n.Discord.URL), n.Discord.Avatar != ""
 	}
+	d.PerHost = st.Settings.MessagePerHost
+	d.Preview = s.preview(d.Template, 0, d.PerHost)
 	return d
 }
 
@@ -691,7 +734,7 @@ func formOf(w server.When) whenForm {
 	case w.Every.Weekly:
 		f.Period, f.Weekday = "week", w.Every.String()
 	case w.Every.Day == server.LastDay:
-		f.Period, f.Day = "month", "last day"
+		f.Period, f.Day = "month", "Last day"
 	case w.Every.Day > 0:
 		f.Period, f.Day = "month", w.Every.String()
 	}
@@ -720,7 +763,8 @@ func whenFrom(r *http.Request, prefix string) (server.When, error) {
 			err = fmt.Errorf("%q is not a weekday", r.FormValue(prefix+"_weekday"))
 		}
 	case "month":
-		every, err = server.ParseEvery(r.FormValue(prefix + "_day"))
+		day := lastDay(r.FormValue(prefix + "_day"))
+		every, err = server.ParseEvery(day)
 		if err == nil && every.Day == 0 {
 			err = fmt.Errorf("%q is not a day of the month from 1 to 30, or last day", r.FormValue(prefix+"_day"))
 		}
@@ -728,6 +772,54 @@ func whenFrom(r *http.Request, prefix string) (server.When, error) {
 		err = fmt.Errorf("%q is not day, week or month", p)
 	}
 	return server.When{Every: every, At: at}, err
+}
+
+// sentence is s with its first letter a capital.
+func sentence(s string) string {
+	r, n := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[n:]
+}
+
+// nextRuns are when check and update run next: as the schedule loop plans
+// them, which keeps a run that waits for the one going on at its own time,
+// or from now when the loop planned with other times, such as just after
+// they were saved.
+func (s *Server) nextRuns(check, upd server.When) (time.Time, time.Time) {
+	now := s.now()
+	act := s.cfg.Runner.Active()
+	next := func(kind string, w server.When) time.Time {
+		at := w.Next(now, s.cfg.Location)
+		// The scheduled run of this kind going on is the plan itself; the
+		// next is the one after it.
+		if act != nil && act.Spec.Manual == "" && act.Spec.Kind == kind {
+			return at
+		}
+		if p, ok := s.cfg.Schedule.Planned(kind); ok && p.When == w && p.At.Before(at) {
+			return p.At
+		}
+		return at
+	}
+	return next(server.KindCheck, check), next(server.KindUpdate, upd)
+}
+
+// perHostForm says whether a form asks for a message for each host. The
+// values are matched in any case.
+func perHostForm(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.FormValue("messages")), "host")
+}
+
+// lastDay reads a number past 30, however long, as the last day, as the
+// page's script shows it. Anything else is left for ParseEvery to judge.
+func lastDay(day string) string {
+	d := strings.TrimSpace(day)
+	if d == "" || strings.Trim(d, "0123456789") != "" {
+		return day
+	}
+	d = strings.TrimLeft(d, "0")
+	if n, _ := strconv.Atoi(d); len(d) > 2 || n > 30 {
+		return "last"
+	}
+	return day
 }
 
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
@@ -788,11 +880,14 @@ func (s *Server) saveTemplate(w http.ResponseWriter, r *http.Request) {
 		st, _ := s.cfg.Store.Read()
 		d := s.settingsData(st)
 		d.Template, d.DefaultTemplate, d.TemplateError = text, false, err.Error()
+		d.PerHost = perHostForm(r)
+		d.Preview = s.preview(text, 0, d.PerHost)
 		s.render(w, http.StatusUnprocessableEntity, "settings", s.newPage(r, st, "settings", "Settings", d))
 		return
 	}
 	err := s.cfg.Store.Update(func(st *store.State) error {
 		st.Settings.Template = text
+		st.Settings.MessagePerHost = perHostForm(r)
 		return nil
 	})
 	if err != nil {
@@ -803,7 +898,8 @@ func (s *Server) saveTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 // testTemplate sends the sample message with the template in the editor,
-// saved or not (P10).
+// saved or not (P10), grouped as the form says: with a second sample host
+// when hosts share messages.
 func (s *Server) testTemplate(w http.ResponseWriter, r *http.Request) {
 	res := testResult{}
 	switch t, err := notify.Parse(strings.ReplaceAll(r.FormValue("template"), "\r\n", "\n")); {
@@ -814,10 +910,15 @@ func (s *Server) testTemplate(w http.ResponseWriter, r *http.Request) {
 	default:
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
-		if err := s.cfg.Notifier.Send(ctx, t, notify.Sample()); err != nil {
+		msgs, notice := notify.SampleRun(notify.Sample()), "Sent a sample message for example-host and example-host-2."
+		perHost := perHostForm(r)
+		if perHost {
+			msgs, notice = msgs[:1], "Sent a sample message for example-host."
+		}
+		if err := s.cfg.Notifier.Deliver(ctx, t, msgs, perHost); err != nil {
 			res.Error = err.Error()
 		} else {
-			res.Notice = "Sent a sample message for example-host."
+			res.Notice = notice
 		}
 	}
 	s.render(w, http.StatusOK, "testresult", page{Data: res})
@@ -832,9 +933,13 @@ type testResult struct {
 // activity answers the strip's poll. When a run it followed has ended, the
 // page reloads to show the results.
 func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
-	a := activity{Active: s.cfg.Runner.Active()}
-	if a.Active == nil && r.URL.Query().Get("following") == "1" {
-		w.Header().Set("HX-Refresh", "true")
+	q := r.URL.Query()
+	seen := q.Get("seen")
+	a := s.activityOf(q.Get("page"), seen)
+	// The run it followed has ended, or one it never saw started and ended
+	// between two asks.
+	if a.Active == nil && (q.Get("following") == "1" || q.Has("seen") && a.Seen != seen) {
+		ended(w, &a, seen)
 	}
 	s.render(w, http.StatusOK, "activity", page{Activity: a})
 }
@@ -848,6 +953,17 @@ func (s *Server) who(r *http.Request) string {
 
 func (s *Server) start(w http.ResponseWriter, r *http.Request, spec server.Spec, what string) {
 	spec.Manual = s.who(r)
+	// A page open since a host was removed still offers it.
+	if st, err := s.cfg.Store.Read(); err == nil {
+		for _, h := range spec.Hosts {
+			if !slices.ContainsFunc(st.Agents, func(a store.Agent) bool { return a.Name == h }) {
+				a := s.activityOf(r.FormValue("page"), r.FormValue("seen"))
+				a.Error = "There is no host named " + h + " now. " + what + " was not started."
+				s.render(w, http.StatusOK, "activity", page{Activity: a})
+				return
+			}
+		}
+	}
 	err := s.cfg.Runner.Start(s.cfg.Base, spec, func(run store.Run, err error) {
 		if err != nil {
 			s.cfg.Log.Error("run by hand failed", "what", what, "err", err)
@@ -855,7 +971,7 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, spec server.Spec,
 		}
 		s.cfg.Log.Info("run by hand finished", "what", what, "id", run.ID, "by", spec.Manual)
 	})
-	a := activity{Active: s.cfg.Runner.Active()}
+	a := s.activityOf(r.FormValue("page"), r.FormValue("seen"))
 	switch {
 	case errors.Is(err, server.ErrBusy):
 		a.Error = "Another run is going on. " + what + " was not started."
@@ -864,7 +980,9 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, spec server.Spec,
 	default:
 		s.cfg.Log.Info("run by hand started", "what", what, "by", spec.Manual)
 		if a.Active == nil {
+			// It has ended already, so the page shows its results now.
 			a.Notice = what + " started."
+			ended(w, &a, r.FormValue("seen"))
 		}
 	}
 	s.render(w, http.StatusOK, "activity", page{Activity: a})

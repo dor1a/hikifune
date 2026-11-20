@@ -94,7 +94,7 @@ func TestE2EServer(t *testing.T) {
 		}
 	}
 	for _, e := range hook.take(t, len(hosts)) {
-		for _, want := range []string{"**Available**", "• `srv-db`", "• `srv-guard` registry:5000/", " (protected)", "• `srv-self`", " (hikifune)"} {
+		for _, want := range []string{"🆕 **Available:**", "• **srv-db**", "• **srv-guard** `registry:5000/", " (protected)", "• **srv-self**", " (hikifune)"} {
 			if !strings.Contains(e.Description, want) {
 				t.Errorf("check message for %s has no %q:\n%s", e.Title, want, e.Description)
 			}
@@ -147,11 +147,11 @@ func TestE2EServer(t *testing.T) {
 	}
 	for _, e := range hook.take(t, len(hosts)) {
 		t.Logf("update message for %s:\n%s", e.Title, e.Description)
-		_, back, _ := strings.Cut(e.Description, "**Rolled back**\n• `srv-bad`")
+		_, back, _ := strings.Cut(e.Description, "🔁 **Rolled back:**\n• **srv-bad**")
 		lines := strings.Split(back, "\n")
-		if !strings.Contains(e.Description, "**Updated**") || !strings.Contains(e.Description, "• `srv-db`") ||
-			!strings.Contains(e.Description, "• `srv-web`") || len(lines) < 2 || strings.TrimSpace(lines[1]) == "" ||
-			!strings.Contains(e.Description, "Reclaimed ") ||
+		if !strings.Contains(e.Description, "✅ **Updated:**") || !strings.Contains(e.Description, "• **srv-db**") ||
+			!strings.Contains(e.Description, "• **srv-web**") || len(lines) < 2 || strings.TrimSpace(lines[1]) == "" ||
+			!strings.Contains(e.Description, "Total reclaimed space: ") ||
 			strings.Contains(e.Description, "srv-guard") || e.Color != 0xC64343 {
 			t.Errorf("update message for %s: color %x\n%s", e.Title, e.Color, e.Description)
 		}

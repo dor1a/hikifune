@@ -1,8 +1,9 @@
 // Schedule rows in Settings. When the period changes, the field it needs
 // shows: a weekday for every week, a day of the month for every month. The
-// day field takes 1 to 30, and stepping past 30 gives "last day". The server
-// renders the saved period's field and checks what is sent, so the page
-// works without this script too.
+// day field takes 1 to 30, and stepping or typing past 30 gives "Last day".
+// Anything else is left as typed and marked invalid, never turned into a
+// day. Without this script every field shows, and the server reads only the
+// one the period needs and checks it, so the page works without it too.
 (function () {
   "use strict";
   var LAST = 31;
@@ -11,39 +12,57 @@
     var period = row.querySelector("select[data-period]");
     if (!period) return;
     row.querySelectorAll("[data-for]").forEach(function (field) {
-      field.hidden = field.getAttribute("data-for") !== period.value;
+      field.classList.toggle("off", field.getAttribute("data-for") !== period.value);
+      field.querySelectorAll("input[data-day]").forEach(check);
     });
   }
 
+  // read is the day the field holds: 1 to 30, LAST for "last" or "last day"
+  // in any case or any number past 30, however long, and null for anything
+  // else.
   function read(input) {
     var v = input.value.trim().toLowerCase();
-    if (v.indexOf("last") === 0) return LAST;
-    var n = parseInt(v, 10);
-    return isNaN(n) ? 1 : Math.min(Math.max(n, 1), 30);
+    if (v === "last" || v === "last day") return LAST;
+    if (!/^[0-9]+$/.test(v)) return null;
+    var digits = v.replace(/^0+/, "");
+    if (digits.length > 2 || parseInt(digits, 10) > 30) return LAST;
+    return digits === "" ? null : parseInt(digits, 10);
   }
 
   function show(input, n) {
-    input.value = n === LAST ? "last day" : String(n);
+    input.value = n === LAST ? "Last day" : String(n);
+    check(input);
+  }
+
+  // check marks a field the form must not send. A hidden field is never
+  // marked: the browser could not show it, and the server ignores it.
+  function check(input) {
+    var hidden = input.closest(".off") !== null;
+    input.setCustomValidity(hidden || read(input) !== null ? "" : "A day from 1 to 30, or last day");
   }
 
   function step(input, by) {
-    show(input, Math.min(Math.max(read(input) + by, 1), LAST));
+    var n = read(input);
+    show(input, Math.min(Math.max((n === null ? 0 : n) + by, 1), LAST));
   }
 
   document.addEventListener("change", function (e) {
     var t = e.target;
     if (t.matches && t.matches("select[data-period]")) sync(t.closest(".when"));
-    if (t.matches && t.matches("input[data-day]")) show(t, read(t));
+    if (t.matches && t.matches("input[data-day]")) {
+      var n = read(t);
+      if (n === null) check(t);
+      else show(t, n);
+    }
   });
 
-  // Typing keeps to digits, and a number above 30 stops at 30.
+  // A number above 30 turns into the last day as it is typed. Words are
+  // left as typed until the field is left.
   document.addEventListener("input", function (e) {
     var t = e.target;
     if (!(t.matches && t.matches("input[data-day]"))) return;
-    if (t.value.toLowerCase().indexOf("last") === 0) return;
-    var digits = t.value.replace(/[^0-9]/g, "").slice(0, 2);
-    if (digits !== "" && parseInt(digits, 10) > 30) digits = "30";
-    if (digits !== t.value) t.value = digits;
+    if (/^\s*[0-9]+\s*$/.test(t.value) && read(t) === LAST) show(t, LAST);
+    else check(t);
   });
 
   document.addEventListener("keydown", function (e) {

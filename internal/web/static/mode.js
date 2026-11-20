@@ -5,6 +5,8 @@
   "use strict";
   var KEY = "hikifune-mode";
   var root = document.documentElement;
+  // Scripts run: fields that only the page's scripts can show start hidden.
+  root.classList.add("js");
   var media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
   function stored() {

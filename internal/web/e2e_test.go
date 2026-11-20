@@ -84,7 +84,7 @@ func TestE2EWeb(t *testing.T) {
 		t.Fatalf("Check now: %s", body)
 	}
 	wait()
-	_, body := do(t, h, "GET", "/", nil)
+	_, body := do(t, h, "GET", "/containers", nil)
 	for _, name := range []string{"ui-guard", "srv-db", "upd-noshell", "plain", "local-build"} {
 		if !strings.Contains(body, ">"+name) {
 			t.Errorf("the containers page has no %s", name)
@@ -99,7 +99,7 @@ func TestE2EWeb(t *testing.T) {
 		t.Error("ui-guard is not offered as a protected update")
 	}
 	_, hostsPage := do(t, h, "GET", "/hosts/"+names[0]+"/status", nil)
-	if !strings.Contains(hostsPage, "agent "+buildinfo.Version) {
+	if !strings.Contains(hostsPage, "Agent "+buildinfo.Version) {
 		t.Errorf("host status: %s", hostsPage)
 	}
 
@@ -136,11 +136,11 @@ func TestE2EWeb(t *testing.T) {
 		t.Fatalf("the update run: %+v", last)
 	}
 	_, body = do(t, h, "GET", "/runs/"+last.ID, nil)
-	if !strings.Contains(body, `class="badge good">updated`) {
+	if !strings.Contains(body, `class="badge good">Updated`) {
 		t.Errorf("run page: %s", body)
 	}
-	_, body = do(t, h, "GET", "/?q=ui-guard&host="+names[0], nil)
-	if !strings.Contains(body, `class="badge good">updated`) || !strings.Contains(body, "1 of") {
+	_, body = do(t, h, "GET", "/containers?q=ui-guard&host="+names[0], nil)
+	if !strings.Contains(body, `class="badge good">Updated`) || !strings.Contains(body, "1 of") {
 		t.Errorf("the containers page does not show the update: %s", body)
 	}
 }

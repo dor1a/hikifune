@@ -20,15 +20,17 @@
 <aside class="sidebar">
   <a class="brand" href="/"><img src="{{asset "favicon.svg"}}" alt="" width="28" height="28"><span>hikifune</span></a>
   <nav class="side-nav" aria-label="Pages">
-    <a href="/"{{if eq .Page "containers"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5 12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9"/></svg>Containers</a>
+    <a href="/"{{if eq .Page "home"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11 12 4l8 7"/><path d="M6 9.5V20h12V9.5M10 20v-5h4v5"/></svg>Home</a>
+    <a href="/containers"{{if eq .Page "containers"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5 12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9"/></svg>Containers</a>
     <a href="/hosts"{{if eq .Page "hosts"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="6.5" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5"/><path d="M7 7.25h.01M7 16.75h.01"/></svg>Hosts</a>
     <a href="/runs"{{if eq .Page "runs"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Runs</a>
     <a href="/settings"{{if eq .Page "settings"}} aria-current="page"{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Settings</a>
   </nav>
+  {{template "activity" .}}
   {{if .Nav}}<nav class="side-hosts" aria-label="Hosts">
     <h3>Hosts</h3>
     {{range .Nav}}<a href="/hosts/{{seg .Name}}"{{if eq .Name $.Host}} aria-current="page"{{end}} title="{{if eq .State "bad"}}its latest run left it out{{else if eq .State "never"}}not checked yet{{else}}{{.Available}} with an update{{end}}">
-      <span class="dot {{.State}}" aria-hidden="true"></span><span class="hn">{{.Name}}</span>{{if .CheckOnly}}<span class="tag">check only</span>{{end}}{{if .Available}}<span class="count">{{.Available}}</span>{{end}}
+      <span class="dot {{.State}}{{if and .CheckOnly (eq .State "ok")}} checkonly{{end}}" aria-hidden="true"></span><span class="hn">{{.Name}}</span>{{if .CheckOnly}}<span class="tag warn">Check only</span>{{end}}{{if .Available}}<span class="count">{{.Available}}</span>{{end}}
     </a>{{end}}
   </nav>{{end}}
   <div class="side-foot">
@@ -40,7 +42,6 @@
   </div>
 </aside>
 <main class="content">
-{{template "activity" .}}
 {{end}}
 {{- end}}
 
@@ -58,24 +59,32 @@
 {{define "activity" -}}
 {{with .Activity}}
 {{if .Active}}
-<div id="activity" class="strip busy" hx-get="/activity?following=1" hx-trigger="every 2s" hx-swap="outerHTML" role="status">
+<div id="activity" class="side-activity" hx-get="/activity?following=1&amp;seen={{.Seen}}&amp;page={{.Page}}" hx-trigger="every 2s" hx-swap="outerHTML" role="status">
+  <div class="act-busy">
   <span class="spinner" aria-hidden="true"></span>
-  <span>{{if .Active.Spec.Container}}Updating {{.Active.Spec.Container}} on {{index .Active.Spec.Hosts 0}}{{else if eq .Active.Spec.Kind "check"}}Checking {{if .Active.Spec.Hosts}}{{index .Active.Spec.Hosts 0}}{{else}}every host{{end}}{{else}}Updating every host{{end}}{{with .Active.Spec.Manual}}, started by {{.}}{{end}}, since {{ago .Active.Started}}. The page reloads when it ends.</span>
+  <span class="act-text"><strong>{{if .Active.Spec.Container}}Updating {{.Active.Spec.Container}} on {{index .Active.Spec.Hosts 0}}{{else if eq .Active.Spec.Kind "check"}}Checking {{if .Active.Spec.Hosts}}{{index .Active.Spec.Hosts 0}}{{else}}every host{{end}}{{else}}Updating every host{{end}}</strong>
+    <span class="muted">{{with .Active.Spec.Manual}}started by {{.}}, {{else}}on schedule, {{end}}since {{ago .Active.Started}}</span></span>
+  </div>
+  {{with .Error}}<span class="msg bad">{{.}}</span>{{end}}
 </div>
 {{else}}
-<div id="activity" class="strip" role="status">
+{{/* Idle, the menu asks now and then, so a run started on schedule or in
+     another tab shows here too. */}}
+<div id="activity" class="side-activity" hx-get="/activity?seen={{.Seen}}&amp;page={{.Page}}" hx-trigger="every 10s" hx-swap="outerHTML" role="status">
   <form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML">
-    <button type="submit" class="primary small">Check now</button>
+    <input type="hidden" name="seen" value="{{.Seen}}"><input type="hidden" name="page" value="{{.Page}}">
+    <button type="submit" class="primary">Check now</button>
   </form>
   {{with .Error}}<span class="msg bad">{{.}}</span>{{end}}
   {{with .Notice}}<span class="msg">{{.}}</span>{{end}}
+  {{if .Ended}}<span class="msg">A run ended. <a href="">Reload</a> for its results; edits not saved here would be lost.</span>{{end}}
 </div>
 {{end}}
 {{end}}
 {{- end}}
 
 {{define "badge" -}}
-<span class="badge {{status .}}">{{words .}}</span>
+<span class="badge {{status .}}">{{sentence (words .)}}</span>
 {{- end}}
 
 {{define "ctable" -}}
@@ -84,10 +93,10 @@
   <tbody>
   {{range .Rows}}
   <tr>
-    <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag" title="hikifune.protected: checked, never updated on schedule">protected</span>{{end}}{{if .Self}} <span class="tag">hikifune</span>{{end}}</div>
+    <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag" title="hikifune.protected: checked, never updated on schedule">Protected</span>{{end}}{{if .Self}} <span class="tag">hikifune</span>{{end}}</div>
       <div class="sub">{{.Image}}{{with .State}}{{if ne . "running"}} · {{.}}{{end}}{{end}}</div></td>
     {{if $.Host}}<td><a href="/hosts/{{seg .Host}}">{{.Host}}</a></td>{{end}}
-    <td>{{template "badge" .Status}}{{if and .Pending (ne .Status "update_available")}} <span class="badge available" title="the check found a newer digest that is not on the container">update available</span>{{end}}</td>
+    <td>{{template "badge" .Status}}{{if and .Pending (ne .Status "update_available")}} <span class="badge available" title="The check found a newer digest that is not on the container">Update available</span>{{end}}</td>
     <td class="reason">{{.Reason}}</td>
     <td class="muted" title="{{local .At}}">{{ago .At}}</td>
     <td class="act">{{if .CanUpdate}}<form hx-post="/actions/update" hx-target="#activity" hx-swap="outerHTML"{{if .Protected}} hx-confirm="{{.Container}} is protected, so it is never updated on schedule. Update it now anyway?"{{end}}>
@@ -111,7 +120,7 @@
     <a href="{{.ListURL}}"{{if .List}} aria-current="true"{{end}}>One list</a>
   </div>
 </div>
-<form class="filters" method="get" action="/" hx-get="/" hx-target="body" hx-push-url="true" hx-trigger="change, submit">
+<form class="filters" method="get" action="/containers" hx-get="/containers" hx-target="body" hx-push-url="true" hx-trigger="change, submit">
   {{if .List}}<input type="hidden" name="view" value="list">{{end}}
   <label>Host
     <select name="host">
@@ -122,7 +131,7 @@
   <label>Status
     <select name="status">
       <option value="">Any</option>
-      {{range .Statuses}}<option value="{{.}}"{{if eq . $.Data.Filter.Status}} selected{{end}}>{{words .}}</option>{{end}}
+      {{range .Statuses}}<option value="{{.}}"{{if eq . $.Data.Filter.Status}} selected{{end}}>{{sentence (words .)}}</option>{{end}}
     </select>
   </label>
   <label class="check"><input type="checkbox" name="protected" value="1"{{if .Filter.Protected}} checked{{end}}> Protected only</label>
@@ -134,7 +143,7 @@
 <div class="card empty">No agents yet. Add one on the server with <code>hikifune agent add &lt;name&gt; &lt;url&gt;</code>.</div>
 {{else if not .Checked}}
 {{range .Hosts}}{{if .Issue}}<p class="msg bad">{{.Agent.Name}}: {{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}{{end}}
-<div class="card empty">No check has run yet. Use Check now above.</div>
+<div class="card empty">No check has run yet. Use Check now in the menu.</div>
 {{else if .List}}
 {{range .Hosts}}{{if .Issue}}<p class="msg bad">{{.Agent.Name}}: {{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}{{end}}
 {{template "ctable" (rows .Rows true)}}
@@ -144,7 +153,7 @@
 <section class="group">
   <div class="group-head">
     <h2><a href="/hosts/{{seg .Agent.Name}}">{{.Agent.Name}}</a></h2>
-    {{if .Agent.CheckOnly}}<span class="tag">check only</span>{{end}}
+    {{if .Agent.CheckOnly}}<span class="tag warn">Check only</span>{{end}}
     <span class="muted small">{{with .Docker}}Docker {{.}} · {{end}}{{if .AsOf.IsZero}}no container list yet{{else}}{{len .Rows}} containers, {{.Available}} with an update · checked {{ago .AsOf}}{{end}}</span>
   </div>
   {{if .Issue}}<p class="msg bad">{{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}
@@ -176,11 +185,11 @@
   {{range .Hosts}}
   <tr>
     <td><div class="name"><a href="/hosts/{{seg .Agent.Name}}">{{.Agent.Name}}</a></div><div class="sub">{{.Agent.URL}}</div></td>
-    <td hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">asking…</span></td>
-    <td>{{if .Issue}}<span class="msg bad">{{.Issue}}</span> <span class="muted">{{ago .IssueAt}}</span>{{else if .AsOf.IsZero}}<span class="muted">never</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{ago .AsOf}}</span>{{end}}</td>
+    <td hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">Asking…</span></td>
+    <td>{{if .Issue}}<span class="msg bad">{{.Issue}}</span> <span class="muted">{{ago .IssueAt}}</span>{{else if .AsOf.IsZero}}<span class="muted">Never</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{ago .AsOf}}</span>{{end}}</td>
     <td><form method="post" action="/hosts/{{seg .Agent.Name}}/check-only">
-      {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag">check only</span> <button type="submit" class="link">Turn updates on</button>
-      {{else}}<input type="hidden" name="on" value="1"><span class="muted">on schedule</span> <button type="submit" class="link">Check only</button>{{end}}
+      {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag warn">Check only</span> <button type="submit" class="link">Turn updates on</button>
+      {{else}}<input type="hidden" name="on" value="1"><span class="muted">On schedule</span> <button type="submit" class="link">Check only</button>{{end}}
     </form></td>
     <td class="act"><form hx-post="/actions/check" hx-target="#activity" hx-swap="outerHTML"><input type="hidden" name="host" value="{{.Agent.Name}}"><button type="submit" class="small">Check now</button></form></td>
   </tr>
@@ -202,11 +211,11 @@
 </div>
 {{if $.Data.Saved}}<p class="msg">Saved.</p>{{end}}
 <dl class="card facts">
-  <div><dt>Now</dt><dd hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">asking…</span></dd></div>
-  <div><dt>Container list</dt><dd>{{if .AsOf.IsZero}}<span class="muted">none yet</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{local .AsOf}}, {{ago .AsOf}}</span>{{end}}</dd></div>
+  <div><dt>Now</dt><dd hx-get="/hosts/{{seg .Agent.Name}}/status" hx-trigger="load" hx-swap="innerHTML"><span class="muted">Asking…</span></dd></div>
+  <div><dt>Container list</dt><dd>{{if .AsOf.IsZero}}<span class="muted">None yet</span>{{else}}{{len .Rows}} containers, {{.Available}} with an update <span class="muted">· {{local .AsOf}}, {{ago .AsOf}}</span>{{end}}</dd></div>
   <div><dt>Schedule</dt><dd><form method="post" action="/hosts/{{seg .Agent.Name}}/check-only"><input type="hidden" name="back" value="host">
-    {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag">check only</span> checked on schedule, never updated then <button type="submit" class="link">Turn updates on</button>
-    {{else}}<input type="hidden" name="on" value="1">checked and updated on schedule <button type="submit" class="link">Check only</button>{{end}}
+    {{if .Agent.CheckOnly}}<input type="hidden" name="on" value="0"><span class="tag warn">Check only</span> Checked on schedule, never updated then <button type="submit" class="link">Turn updates on</button>
+    {{else}}<input type="hidden" name="on" value="1">Checked and updated on schedule <button type="submit" class="link">Check only</button>{{end}}
   </form></dd></div>
 </dl>
 {{if .Issue}}<p class="msg bad">{{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}
@@ -218,7 +227,89 @@
 {{- end}}
 
 {{define "hoststatus" -}}
-{{with .Data}}{{if .Error}}<span class="msg bad">{{.Error}}</span>{{else}}agent {{.Version.Agent}}{{with .Version.Docker}} · Docker {{.Version}}, API {{.APIVersion}}{{end}} <span class="muted">· {{.Took}}</span>{{end}}{{end}}
+{{with .Data}}{{if .Error}}<span class="msg bad">{{.Error}}</span>{{else}}Agent {{.Version.Agent}}{{with .Version.Docker}} · Docker {{.Version}}, API {{.APIVersion}}{{end}} <span class="muted">· {{.Took}}</span>{{end}}{{end}}
+{{- end}}
+
+{{define "runrows" -}}
+{{range .}}
+  <tr>
+    <td><a href="/runs/{{.ID}}">{{local .Started}}</a><div class="sub">{{ago .Started}}</div></td>
+    <td>{{sentence .Kind}}{{with .Container}} of {{.}}{{end}}{{with .Manual}} <span class="tag">By {{.}}</span>{{end}}</td>
+    <td>{{range $k, $v := .Counts}}{{if or (eq $k "update_available") (eq $k "updated") (eq $k "rolled_back") (eq $k "failed")}}<span class="badge {{status $k}}">{{$v}} {{words $k}}</span> {{end}}{{end}}{{if .Issues}}<span class="badge bad">{{.Issues}} host{{if gt .Issues 1}}s{{end}} left out</span>{{end}}</td>
+    <td class="muted">{{took .Started .Finished}}</td>
+  </tr>
+{{else}}
+  <tr><td colspan="4" class="empty">No runs yet.</td></tr>
+{{end}}
+{{- end}}
+
+{{define "home" -}}
+{{template "top" .}}
+{{with .Data}}
+<h1 class="title">Home</h1>
+<div class="tiles">
+  <a class="tile" href="/hosts"><span class="tile-label">Hosts</span><span class="tile-value">{{.Hosts}}</span><span class="tile-sub">{{if .CheckOnly}}{{.CheckOnly}} check only{{else if .Hosts}}all updated on schedule{{else}}none yet{{end}}</span></a>
+  <a class="tile" href="/containers"><span class="tile-label">Containers</span><span class="tile-value">{{.Containers}}</span><span class="tile-sub">as of the latest check</span></a>
+  <a class="tile{{if .Available}} accent{{end}}" href="/containers?status=update_available"><span class="tile-label">Updates</span><span class="tile-value">{{.Available}}</span><span class="tile-sub">available</span></a>
+  <div class="tile"><span class="tile-label">Next</span><span class="tile-next">Check {{.NextCheck}}</span><span class="tile-next">Update {{.NextUpdate}}</span></div>
+</div>
+<section class="card map-card">
+  <div class="map-head"><h2>Map</h2>
+    <nav class="seg" aria-label="Map layout">{{range .Layouts}}<a href="{{if $.Data.Map}}/home/map?layout={{else}}/?map={{end}}{{.Value}}"{{if eq .Value $.Data.Layout}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
+  </div>
+  <div id="map" hx-get="/home/map?layout={{.Layout}}" hx-trigger="{{if not .Map}}load, {{end}}every 15s" hx-swap="innerHTML">{{with .Map}}{{template "mapbody" .}}{{else}}<p class="muted">Asking the agents…</p>
+    <noscript><p><a href="/home/map?layout={{.Layout}}">Show the map</a>. Without JavaScript it does not refresh by itself.</p></noscript>{{end}}</div>
+</section>
+<h2 class="section-title">Recent runs <a class="small" href="/runs">All runs</a></h2>
+<table class="list">
+  <thead><tr><th>Started</th><th>Run</th><th>Results</th><th>Took</th></tr></thead>
+  <tbody>{{template "runrows" .Recent}}</tbody>
+</table>
+{{end}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "homemap" -}}
+{{template "mapbody" .Data}}
+{{- end}}
+
+{{define "mapbody" -}}
+{{if .Empty}}<p class="muted">No hosts yet. Add one on the server with <code>docker compose exec hikifune hikifune agent add &lt;name&gt; &lt;url&gt;</code>.</p>
+{{else}}
+<p class="map-caption muted small">{{.Answering}} of {{.Of}} agents answering{{if .Server.Busy}} · {{sentence .Server.BusyKind}} run going on{{end}}</p>
+<svg class="map {{.Layout}}" viewBox="0 0 {{.W}} {{.H}}" role="img" aria-label="The server and its agents">
+  {{if eq .Layout "orbit"}}{{with .Orbit}}<ellipse class="orbit" cx="{{.CX}}" cy="{{.CY}}" rx="{{.RX}}" ry="{{.RY}}"/>{{end}}{{end}}
+  <g class="links">
+  {{range .Links}}<path id="{{.ID}}" class="link {{.State}}" d="{{.D}}"/>
+  {{if ne .State "down"}}<circle class="traveler {{.State}}" r="4.5"><animateMotion dur="{{if eq .State "busy"}}1.2s{{else}}2.8s{{end}}" begin="{{.Delay}}" repeatCount="indefinite"><mpath href="#{{.ID}}"/></animateMotion></circle>{{end}}
+  {{end}}
+  </g>
+  {{with .Server}}<g class="server{{if .Busy}} busy{{end}}">
+    <rect x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}" rx="16"/>
+    <image href="{{asset "favicon.svg"}}" x="{{.LogoX}}" y="{{.LogoY}}" width="40" height="40"/>
+    <clipPath id="server-clip"><rect x="{{.ClipX}}" y="{{.Y}}" width="{{.ClipW}}" height="{{.H}}"/></clipPath>
+    <g clip-path="url(#server-clip)">
+    <text x="{{.TextX}}" y="{{.NameY}}" class="server-name">hikifune</text>
+    <text x="{{.TextX}}" y="{{.SubY}}" class="server-sub">{{if .Busy}}{{sentence .BusyKind}} run going on{{else}}Server {{.Version}}{{end}}</text>
+    </g>
+  </g>{{end}}
+  {{range $i, $n := .Nodes}}<a href="{{.Href}}" class="node {{.State}}">
+    <title>{{.Name}}{{with .Note}}: {{.}}{{end}}{{if .CheckOnly}} (check only){{end}}</title>
+    <clipPath id="node-clip-{{$i}}"><rect x="{{.ClipX}}" y="{{.Y}}" width="{{.ClipW}}" height="{{.H}}"/></clipPath>
+    <rect class="box" x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}" rx="14"/>
+    <circle class="ring" cx="{{.DotX}}" cy="{{.DotY}}" r="6"/>
+    <circle class="dot" cx="{{.DotX}}" cy="{{.DotY}}" r="5.5"/>
+    <g clip-path="url(#node-clip-{{$i}})">
+    <text class="name" x="{{.NameX}}" y="{{.NameY}}">{{.Label}}</text>
+    <text class="sub" x="{{.TextX}}" y="{{.Line2Y}}">{{.Sub}}</text>
+    <text class="sub" x="{{.TextX}}" y="{{.Line3Y}}">{{.Containers}} containers</text>
+    {{if .Available}}<text class="avail" x="{{.RightX}}" y="{{.Line3Y}}" text-anchor="end">↑ {{.Available}}</text>{{end}}
+    </g>
+    {{if .CheckOnly}}<rect class="badge" x="{{.BadgeX}}" y="{{.BadgeY}}" width="70" height="18" rx="9"/><text class="badge-text" x="{{.BadgeTX}}" y="{{.BadgeTY}}" text-anchor="middle">Check only</text>{{end}}
+  </a>
+  {{end}}
+</svg>
+{{end}}
 {{- end}}
 
 {{define "runs" -}}
@@ -226,18 +317,7 @@
 <h1 class="title">Runs</h1>
 <table class="list">
   <thead><tr><th>Started</th><th>Run</th><th>Results</th><th>Took</th></tr></thead>
-  <tbody>
-  {{range .Data}}
-  <tr>
-    <td><a href="/runs/{{.ID}}">{{local .Started}}</a><div class="sub">{{ago .Started}}</div></td>
-    <td>{{.Kind}}{{with .Container}} of {{.}}{{end}}{{with .Manual}} <span class="tag">by {{.}}</span>{{end}}</td>
-    <td>{{range $k, $v := .Counts}}{{if or (eq $k "update_available") (eq $k "updated") (eq $k "rolled_back") (eq $k "failed")}}<span class="badge {{status $k}}">{{$v}} {{words $k}}</span> {{end}}{{end}}{{if .Issues}}<span class="badge bad">{{.Issues}} host{{if gt .Issues 1}}s{{end}} left out</span>{{end}}</td>
-    <td class="muted">{{took .Started .Finished}}</td>
-  </tr>
-  {{else}}
-  <tr><td colspan="4" class="empty">No runs yet.</td></tr>
-  {{end}}
-  </tbody>
+  <tbody>{{template "runrows" .Data}}</tbody>
 </table>
 {{template "bottom" .}}
 {{- end}}
@@ -245,10 +325,10 @@
 {{define "run" -}}
 {{template "top" .}}
 {{with .Data}}
-<h1 class="title">{{.Kind}} run{{with .Container}} of {{.}}{{end}} <span class="muted">{{local .Started}}{{with .Manual}}, by {{.}}{{end}}, took {{took .Started .Finished}}</span></h1>
+<h1 class="title">{{sentence .Kind}} run{{with .Container}} of {{.}}{{end}} <span class="muted">{{local .Started}}{{with .Manual}}, by {{.}}{{end}}, took {{took .Started .Finished}}</span></h1>
 {{range .Hosts}}
 <section class="card host">
-  <h2>{{.Agent}} <span class="muted">{{with .AgentVersion}}agent {{.}}{{end}}{{with .Docker}} · Docker {{.}}{{end}}{{if .Reclaimed}} · reclaimed {{bytes .Reclaimed}}{{end}}</span></h2>
+  <h2>{{.Agent}} <span class="muted">{{with .AgentVersion}}Agent {{.}}{{end}}{{with .Docker}} · Docker {{.}}{{end}}{{if .Reclaimed}} · Reclaimed {{bytes .Reclaimed}}{{end}}</span></h2>
   {{with .Skipped}}<p class="msg bad">Left out: {{.}}</p>{{end}}
   {{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
   {{if .Containers}}
@@ -257,7 +337,7 @@
     <tbody>
     {{range .Containers}}
     <tr>
-      <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag">protected</span>{{end}}</div><div class="sub">{{.Image}}</div></td>
+      <td><div class="name">{{.Container}}{{if .Protected}} <span class="tag">Protected</span>{{end}}</div><div class="sub">{{.Image}}</div></td>
       <td>{{template "badge" .Status}}</td>
       <td class="reason">{{.Reason}}</td>
       <td class="muted mono">{{short .RemoteDigest}}</td>
@@ -276,15 +356,15 @@
 <div class="when">
   <span class="label">{{.Label}}</span>
   <select name="{{.Name}}_period" data-period aria-label="{{.Label}}: how often">
-    <option value="day"{{if eq .Form.Period "day"}} selected{{end}}>every day</option>
-    <option value="week"{{if eq .Form.Period "week"}} selected{{end}}>every week</option>
-    <option value="month"{{if eq .Form.Period "month"}} selected{{end}}>every month</option>
+    <option value="day"{{if eq .Form.Period "day"}} selected{{end}}>Every day</option>
+    <option value="week"{{if eq .Form.Period "week"}} selected{{end}}>Every week</option>
+    <option value="month"{{if eq .Form.Period "month"}} selected{{end}}>Every month</option>
   </select>
-  <span class="when-field" data-for="week"{{if ne .Form.Period "week"}} hidden{{end}}><span class="muted">on</span>
+  <span class="when-field{{if ne .Form.Period "week"}} off{{end}}" data-for="week"><span class="muted">on</span>
     <select name="{{.Name}}_weekday" aria-label="{{.Label}}: weekday">
       {{range .Weekdays}}<option value="{{.Value}}"{{if eq .Value $.Form.Weekday}} selected{{end}}>{{.Name}}</option>{{end}}
     </select></span>
-  <span class="when-field" data-for="month"{{if ne .Form.Period "month"}} hidden{{end}}><span class="muted">on</span>
+  <span class="when-field{{if ne .Form.Period "month"}} off{{end}}" data-for="month"><span class="muted">on</span>
     <span class="day-field"><input type="text" name="{{.Name}}_day" value="{{.Form.Day}}" inputmode="numeric" autocomplete="off" data-day
       aria-label="{{.Label}}: day of the month, 1 to 30 or last day"><span class="spin"><button type="button" data-step="1" tabindex="-1" aria-label="Later day">▲</button><button type="button" data-step="-1" tabindex="-1" aria-label="Earlier day">▼</button></span></span></span>
   <span class="muted">at</span>
@@ -300,10 +380,10 @@
 {{with .Error}}<p class="msg bad">{{.}}</p>{{end}}
 <form class="card settings" method="post" action="/settings">
   <h2>Schedule</h2>
-  <p class="muted">In {{.Location}}. {{if .Saved}}Set here.{{else}}From the environment: check {{.DefaultCheck}}, update {{.DefaultUpdate}}.{{end}} On day 29 or 30, a shorter month runs on its last day.</p>
+  <p class="muted">In {{.Location}}. {{if .Saved}}Set here.{{else}}From the environment: check {{.DefaultCheck}}, update {{.DefaultUpdate}}.{{end}} On day 29 or 30, a shorter month runs on its last day; a day past 30 is the last day.</p>
   {{template "when" (when "Check" "check" .Check)}}
   {{template "when" (when "Update" "update" .Update)}}
-  <p class="muted">Next check {{local .NextCheck}}, next update {{local .NextUpdate}}. Each updated container is watched for {{.Watch}}.</p>
+  <p class="muted">Next check {{.NextCheck}}, next update {{.NextUpdate}}. Each updated container is watched for {{.Watch}}.</p>
   <div class="buttons">
     <button type="submit" class="primary">Save</button>
     {{if .Saved}}<button type="submit" name="reset" value="1" class="link" formnovalidate>Use the environment's schedule</button>{{end}}
@@ -316,11 +396,32 @@
   <h2>Notifications</h2>
   <dl class="facts">
     <div><dt>Discord webhook</dt><dd>{{if .Webhook}}<code>{{.Webhook}}</code> <span class="muted">from HIKIFUNE_DISCORD_WEBHOOK_URL, token hidden</span>{{else}}<span class="muted">Not set, so no notifications are sent. Set HIKIFUNE_DISCORD_WEBHOOK_URL and restart the server.</span>{{end}}</dd></div>
-    <div><dt>Avatar</dt><dd class="muted">{{if .Avatar}}from HIKIFUNE_DISCORD_AVATAR_URL{{else}}the one set on the webhook in Discord{{end}}</dd></div>
-    <div><dt>Sent</dt><dd class="muted">after the scheduled runs, one message per host with something to say</dd></div>
+    <div><dt>Avatar</dt><dd class="muted">{{if .Avatar}}From HIKIFUNE_DISCORD_AVATAR_URL{{else}}The one set on the webhook in Discord{{end}}</dd></div>
+    <div><dt>Sent</dt><dd class="muted">After the scheduled runs, for each host with something to say</dd></div>
+    <div><dt><label for="messages">Messages</label></dt><dd><select id="messages" name="messages" hx-post="/settings/template/preview" hx-trigger="change" hx-target="#template-preview" hx-swap="innerHTML">
+      <option value="run"{{if not .PerHost}} selected{{end}}>One per run, an embed for each host</option>
+      <option value="host"{{if .PerHost}} selected{{end}}>One per host</option>
+    </select></dd></div>
   </dl>
-  <label class="block" for="template">Message template{{if .DefaultTemplate}} <span class="tag">default</span>{{end}}</label>
-  <textarea id="template" name="template" rows="18" spellcheck="false">{{.Template}}</textarea>
+  <div class="template-grid">
+  <div class="template-edit">
+  <label class="block" for="template">Message template{{if .DefaultTemplate}} <span class="tag">Default</span>{{end}}</label>
+  <textarea id="template" name="template" rows="18" spellcheck="false"
+    hx-post="/settings/template/preview" hx-trigger="input changed delay:500ms" hx-target="#template-preview" hx-swap="innerHTML">{{.Template}}</textarea>
+  </div>
+  {{$p := .Preview}}
+  <div>
+  <div class="preview-head">
+    <label for="sample">Preview</label>
+    <select id="sample" name="sample" hx-post="/settings/template/preview" hx-trigger="change" hx-target="#template-preview" hx-swap="innerHTML">
+      {{range $i, $n := $p.Samples}}<option value="{{$i}}"{{if eq $i $p.Sample}} selected{{end}}>{{$n}}</option>{{end}}
+    </select>
+    <noscript><button type="submit" formaction="/settings/template/preview" class="small">Preview</button></noscript>
+    <span class="muted small">Close to Discord, not the same; Send test shows the real one.</span>
+  </div>
+  <div id="template-preview" role="status">{{template "previewbody" $p}}</div>
+  </div>
+  </div>
   <p class="muted small">Go text/template for the embed text; the title is the host. Fields: <code>.Host</code>, <code>.Kind</code>, <code>.At</code>, <code>.LeftOut</code>, <code>.Available</code>, <code>.Updated</code>, <code>.RolledBack</code>, <code>.Failed</code> (each item has <code>.Container</code>, <code>.Image</code>, <code>.Reason</code>, <code>.Protected</code>, <code>.Self</code>), <code>.Reclaimed</code>, <code>.Note</code>. <code>md</code> escapes Discord markdown.</p>
   <div class="buttons">
     <button type="submit" class="primary">Save</button>
@@ -331,6 +432,28 @@
 </form>
 {{end}}
 {{template "bottom" .}}
+{{- end}}
+
+{{define "templatepreview" -}}
+{{with .Data}}{{template "previewbody" .}}{{end}}
+{{- end}}
+
+{{define "previewbody" -}}
+{{if .Error}}<p class="msg bad">The template does not work: {{.Error}}</p>
+{{- else}}
+{{with .Fallback}}<p class="muted small">The template fails or writes nothing for this message ({{.}}), so the default template writes it.</p>{{end}}
+{{if .Nothing}}<p class="muted small">Nothing is sent for this message.</p>{{end}}
+{{range .Messages}}<div class="discord-msg">
+  <div class="discord-head"><span class="discord-name">hikifune</span> <span class="discord-app">APP</span></div>
+  {{range .}}<div class="embed tone-{{.Tone}}">
+    <div class="embed-title">{{.Title}}</div>
+    <div class="embed-body">{{.Description}}</div>
+    <div class="embed-foot">{{.Footer}}{{with .At}} · {{.}}{{end}}</div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{- end}}
 {{- end}}
 
 {{define "testresult" -}}

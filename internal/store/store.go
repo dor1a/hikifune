@@ -48,6 +48,9 @@ type Settings struct {
 	UpdateSavedAt time.Time `json:"update_saved_at,omitzero"`
 	// Template is the notification template; empty means the default (R19).
 	Template string `json:"template,omitempty"`
+	// MessagePerHost sends each host its own message; by default the hosts
+	// of a run share messages, an embed each.
+	MessagePerHost bool `json:"message_per_host,omitempty"`
 }
 
 // Entry is one container in a run record (R31).

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dor1a/hikifune/internal/store"
@@ -59,7 +60,9 @@ func ParseEvery(s string) (Every, error) {
 			return Every{Weekly: true, Weekday: wd}, nil
 		}
 	}
-	if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 31 {
+	// Digits only: Atoi would also take a sign, as in +31, which the page
+	// does not.
+	if n, err := strconv.Atoi(s); err == nil && strings.Trim(s, "0123456789") == "" && n >= 1 && n <= 31 {
 		return Every{Day: n}, nil
 	}
 	return Every{}, fmt.Errorf("%q is not day, a weekday such as sun, a day of the month from 1 to 30, or last", s)
@@ -175,6 +178,31 @@ type Schedule struct {
 
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
+
+	mu      sync.Mutex
+	planned map[string]Planned
+}
+
+// Planned is when the loop will next run a kind, and the schedule it
+// planned that with. A time already past is a run waiting for the one going
+// on, which starts as soon as it ends.
+type Planned struct {
+	When When
+	At   time.Time
+}
+
+// Planned is the loop's plan for kind; ok is false until it has made one.
+func (s *Schedule) Planned(kind string) (Planned, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.planned[kind]
+	return p, ok
+}
+
+func (s *Schedule) plan(p map[string]Planned) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.planned = p
 }
 
 // Times are the check and update schedules in force: the web UI's once
@@ -266,6 +294,7 @@ func (s *Schedule) Loop(ctx context.Context) {
 		}
 		seen, seenSaved = planned, saved
 		check, upd := checkWhen.Next(ref[KindCheck], s.Location), updateWhen.Next(ref[KindUpdate], s.Location)
+		s.plan(map[string]Planned{KindCheck: {checkWhen, check}, KindUpdate: {updateWhen, upd}})
 		kinds, at := []string{KindCheck}, check
 		switch {
 		case upd.Before(check):

@@ -94,7 +94,12 @@ func Redact(u string) string {
 // Post sends one embed under the hikifune name. A rate limit is waited out
 // as Discord asks, and a server error is tried again shortly.
 func (d *Discord) Post(ctx context.Context, e embed) error {
-	p := payload{Username: "hikifune", AvatarURL: d.Avatar, Embeds: []embed{e}}
+	return d.PostAll(ctx, []embed{e})
+}
+
+// PostAll posts one message holding embeds, at most 10 of them.
+func (d *Discord) PostAll(ctx context.Context, embeds []embed) error {
+	p := payload{Username: "hikifune", AvatarURL: d.Avatar, Embeds: embeds}
 	p.AllowedMentions.Parse = []string{}
 	body, err := json.Marshal(p)
 	if err != nil {

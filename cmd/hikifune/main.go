@@ -147,6 +147,10 @@ func notifier(st store.Store) (*notify.Notifier, error) {
 			}
 			return s.Settings.Template
 		},
+		PerHost: func() bool {
+			s, err := st.Read()
+			return err == nil && s.Settings.MessagePerHost
+		},
 		Log: slog.Default(),
 	}, nil
 }
@@ -156,6 +160,7 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	r.NotifyAfter = true
 	loc := time.Local
 	if tz := os.Getenv("HIKIFUNE_TIMEZONE"); tz != "" {
 		if loc, err = time.LoadLocation(tz); err != nil {

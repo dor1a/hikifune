@@ -85,11 +85,11 @@ func TestBuildAnUpdateRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "**Updated**\n• `prom` prom:1\n\n" +
-		"**Rolled back**\n• `web` web:1\n  exited with code 1 within the 2m watch\n\n" +
-		"**Failed**\n• `app` app:1\n  create the new container: port 8181 is already allocated\n" +
-		"• `private` private:1\n  registry: unauthorized\n\n" +
-		"Reclaimed 4.8 GB\nprune: refused"
+	want := "✅ **Updated:**\n• **prom** `prom:1`\n\n" +
+		"🔁 **Rolled back:**\n• **web** `web:1`\n  exited with code 1 within the 2m watch\n\n" +
+		"❌ **Failed:**\n• **app** `app:1`\n  create the new container: port 8181 is already allocated\n" +
+		"• **private** `private:1`\n  registry: unauthorized\n\n" +
+		"prune: refused\nTotal reclaimed space: 4.8 GB"
 	if text != want {
 		t.Errorf("text:\n%s\nwant:\n%s", text, want)
 	}
@@ -326,7 +326,7 @@ func TestPost(t *testing.T) {
 	}
 	e := p.Embeds[0]
 	if e.Title != "a" || e.Color != colorAvailable || e.Footer == nil || e.Footer.Text != "check run" ||
-		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "**Available**\n• `web` web:1" {
+		e.Timestamp != "2026-11-20T01:00:00Z" || e.Description != "🆕 **Available:**\n• **web** `web:1`" {
 		t.Errorf("embed %+v", e)
 	}
 }
@@ -433,7 +433,8 @@ func TestALongMessageGoesInParts(t *testing.T) {
 		es = append(es, e)
 	}
 	run := store.Run{Kind: "update", Started: t0, Hosts: []store.HostRun{{Agent: "a", Containers: es}}}
-	if err := (&Notifier{Discord: d}).Run(context.Background(), run); err != nil {
+	perHost := func() bool { return true }
+	if err := (&Notifier{Discord: d, PerHost: perHost}).Run(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.bodies) < 3 {
@@ -452,7 +453,7 @@ func TestABrokenTemplateFallsBackToTheDefault(t *testing.T) {
 	d, _ := newDiscord(t, f)
 	n := &Notifier{Discord: d, Template: func() string { return "{{.Nope}}" }}
 	run := store.Run{Kind: "check", Hosts: []store.HostRun{{Agent: "a", Containers: []store.Entry{entry("web", "update_available", true)}}}}
-	if err := n.Run(context.Background(), run); err != nil || len(f.bodies) != 1 || !strings.Contains(f.bodies[0].Embeds[0].Description, "**Available**") {
+	if err := n.Run(context.Background(), run); err != nil || len(f.bodies) != 1 || !strings.Contains(f.bodies[0].Embeds[0].Description, "🆕 **Available:**") {
 		t.Fatalf("err %v, posts %+v", err, f.bodies)
 	}
 }
@@ -466,7 +467,7 @@ func TestATemplateThatFailsOnAMessage(t *testing.T) {
 		f.bodies = nil
 		n := &Notifier{Discord: d, Template: func() string { return tpl }}
 		run := store.Run{Kind: "check", Hosts: []store.HostRun{{Agent: "old", Skipped: "the agent runs v0"}}}
-		if err := n.Run(context.Background(), run); err != nil || len(f.bodies) != 1 || !strings.Contains(f.bodies[0].Embeds[0].Description, "Left out: the agent runs v0") {
+		if err := n.Run(context.Background(), run); err != nil || len(f.bodies) != 1 || !strings.Contains(f.bodies[0].Embeds[0].Description, "⚠️ **Left out:** the agent runs v0") {
 			t.Errorf("%s: err %v, posts %+v", tpl, err, f.bodies)
 		}
 	}
@@ -522,5 +523,114 @@ func TestManyLongFailuresGoInParts(t *testing.T) {
 	run := store.Run{Kind: "check", Hosts: []store.HostRun{{Agent: "a", Containers: es}}}
 	if err := (&Notifier{Discord: d}).Run(context.Background(), run); err != nil || len(f.bodies) < 20 {
 		t.Fatalf("err %v, %d posts", err, len(f.bodies))
+	}
+}
+
+// Embeds lays a message out as Send posts it: in parts with numbered titles,
+// the result's color, the run in the footer, and the default template when
+// the one given writes nothing for a message with something to say.
+func TestEmbeds(t *testing.T) {
+	long, err := Parse(strings.Repeat("line of the message\n", 300))
+	if err != nil {
+		t.Fatal(err)
+	}
+	es, fallback, err := Embeds(long, Sample())
+	if err != nil || fallback != nil || len(es) != 2 || es[0].Title != "example-host (1/2)" || es[1].Title != "example-host (2/2)" ||
+		es[0].Color != colorBad || es[0].Tone != ToneBad || es[0].Footer != "update run" || !es[0].At.Equal(Sample().At) {
+		t.Fatalf("long: %d embeds, %v, %v, %+v", len(es), fallback, err, es)
+	}
+	silent, err := Parse("{{with .Updated}}x{{end}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := SampleKinds()
+	es, fallback, err = Embeds(silent, kinds[1].Message)
+	if err != nil || fallback == nil || len(es) != 1 || !strings.Contains(es[0].Description, "🆕 **Available:**") {
+		t.Errorf("silent template: %v, %v, %+v", fallback, err, es)
+	}
+	es, fallback, err = Embeds(silent, Message{Host: "quiet", Kind: "check"})
+	if err != nil || fallback != nil || len(es) != 0 {
+		t.Errorf("a message with nothing to say: %v, %v, %+v", fallback, err, es)
+	}
+	// A template is checked on what the preview shows, the sample host and
+	// the second host of a run, so one that fails there is not saved.
+	for _, text := range []string{
+		`{{if eq .Host "example-host"}}{{index .Updated 0}}{{else}}ok{{end}}`,
+		`{{if eq .Host "example-host-2"}}{{index .Failed 0}}{{end}}x`,
+	} {
+		if _, err := Parse(text); err == nil || !strings.Contains(err.Error(), "for a ") {
+			t.Errorf("%s: %v", text, err)
+		}
+	}
+	// A template saved under older checks still sends: only the message it
+	// fails on gives way to the default.
+	old := `{{if eq .Host "example-host-2"}}{{index .Failed 0}}{{else}}custom {{.Host}}{{end}}`
+	lt, err := Load(old)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if es, fallback, err := Embeds(lt, Message{Host: "prod", Kind: "check", Available: Sample().Available}); err != nil || fallback != nil ||
+		len(es) != 1 || es[0].Description != "custom prod" {
+		t.Errorf("an old template on prod: %+v, %v, %v", es, fallback, err)
+	}
+	if kinds[0].Name != "Message with every part" || kinds[1].Message.Host != "example-host" || len(kinds) != len(samples()) {
+		t.Errorf("sample kinds: %+v", kinds[:2])
+	}
+}
+
+// By default the hosts of a run share a message, an embed each with its
+// own color; per host, each gets its own.
+func TestARunSharesAMessage(t *testing.T) {
+	run := store.Run{Kind: "update", Started: t0, Hosts: []store.HostRun{
+		{Agent: "a", Containers: []store.Entry{entry("web", "updated", false)}},
+		{Agent: "b", Containers: []store.Entry{entry("db", "rolled_back", false)}},
+		{Agent: "c", Containers: []store.Entry{entry("cache", "up_to_date", false)}},
+	}}
+	f := &fakeDiscord{}
+	d, _ := newDiscord(t, f)
+	if err := (&Notifier{Discord: d}).Run(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.bodies) != 1 || len(f.bodies[0].Embeds) != 2 {
+		t.Fatalf("%d posts: %+v", len(f.bodies), f.bodies)
+	}
+	if a, b := f.bodies[0].Embeds[0], f.bodies[0].Embeds[1]; a.Title != "a" || a.Color != colorUpdated || b.Title != "b" || b.Color != colorBad {
+		t.Errorf("embeds %+v, %+v", a, b)
+	}
+	f.bodies = nil
+	if err := (&Notifier{Discord: d, PerHost: func() bool { return true }}).Run(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.bodies) != 2 || len(f.bodies[0].Embeds) != 1 || f.bodies[1].Embeds[0].Title != "b" {
+		t.Errorf("per host: %d posts", len(f.bodies))
+	}
+}
+
+// Pack keeps each message within Discord's limits: ten embeds, and 6,000
+// characters across them.
+func TestPack(t *testing.T) {
+	sizes := func(msgs [][]Embed) []int {
+		var out []int
+		for _, m := range msgs {
+			out = append(out, len(m))
+		}
+		return out
+	}
+	var small []Embed
+	for range 11 {
+		small = append(small, Embed{Title: "h", Description: "x"})
+	}
+	if got := sizes(Pack(small)); fmt.Sprint(got) != "[10 1]" {
+		t.Errorf("11 small embeds: %v", got)
+	}
+	var big []Embed
+	for range 3 {
+		big = append(big, Embed{Title: "h", Description: strings.Repeat("é", 2500)})
+	}
+	if got := sizes(Pack(big)); fmt.Sprint(got) != "[2 1]" {
+		t.Errorf("3 embeds of 2,500 characters: %v", got)
+	}
+	if got := Pack(nil); len(got) != 0 {
+		t.Errorf("nothing: %v", got)
 	}
 }

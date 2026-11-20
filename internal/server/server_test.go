@@ -405,13 +405,17 @@ func TestScheduleRunsAnOverdueRun(t *testing.T) {
 	// Each run takes 90 minutes.
 	r.now = func() time.Time { return now }
 	var waits []time.Duration
-	s := &Schedule{Runner: r, Location: seoul, CheckAt: Clock{0, 0}, UpdateAt: Clock{1, 0},
+	var plans []time.Time
+	var s *Schedule
+	s = &Schedule{Runner: r, Location: seoul, CheckAt: Clock{0, 0}, UpdateAt: Clock{1, 0},
 		now: func() time.Time { return now },
 		sleep: func(_ context.Context, d time.Duration) error {
 			if st, _ := r.Store.Read(); len(st.Runs) >= 2 {
 				return context.Canceled
 			}
 			waits = append(waits, d)
+			p, _ := s.Planned(KindUpdate)
+			plans = append(plans, p.At)
 			if d > 0 {
 				now = now.Add(d)
 			}
@@ -422,6 +426,11 @@ func TestScheduleRunsAnOverdueRun(t *testing.T) {
 	st, _ := r.Store.Read()
 	if len(st.Runs) != 2 || st.Runs[1].Kind != KindUpdate || waits[1] > 0 {
 		t.Fatalf("runs %d, waits %v", len(st.Runs), waits)
+	}
+	// While it waits, the plan still says 01:00, the time it was due, not
+	// the next day's.
+	if want := time.Date(2026, 11, 20, 1, 0, 0, 0, seoul); len(plans) < 2 || !plans[1].Equal(want) {
+		t.Fatalf("planned updates %v, want %v second", plans, want)
 	}
 }
 
@@ -1112,6 +1121,32 @@ func TestEvery(t *testing.T) {
 }
 
 // Scheduled runs and runs from the CLI are notified; runs by hand are not.
+// A server sends in the background: a webhook that hangs holds back no
+// run, and the messages keep the order the runs ended in.
+func TestNotifyAfter(t *testing.T) {
+	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
+	release := make(chan struct{})
+	got := make(chan string, 2)
+	r.NotifyAfter = true
+	r.Notify = func(_ context.Context, run store.Run) {
+		if run.Kind == KindCheck {
+			<-release
+		}
+		got <- run.Kind
+	}
+	if _, err := r.Run(context.Background(), KindCheck); err != nil {
+		t.Fatal(err)
+	}
+	// The check's message hangs, yet the update runs.
+	if _, err := r.Run(context.Background(), KindUpdate); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if a, b := <-got, <-got; a != KindCheck || b != KindUpdate {
+		t.Errorf("messages in the order %s, %s", a, b)
+	}
+}
+
 func TestNotify(t *testing.T) {
 	a := newHost()
 	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}

@@ -48,9 +48,9 @@ All 57 Discord messages were delivered, but the reasons for failures only appear
 | R14 | Rollback runs automatically for every update, scheduled or started with Update now (changed from scheduled only before M5: a failed update by hand would otherwise leave a broken new container and a renamed old one). There is no manual rollback button and old images are not kept |
 | R15 | A digest whose update failed is skipped at the next run. A newer digest is tried again. A failure belongs to the agent it happened on, told by the ID `hikifune agent add` gives each agent, so one of an agent since removed, or of an earlier agent of the same name, is ignored and dropped whatever the clocks say (an agent without an ID, from before IDs, goes by the time it was added) |
 | R16 | Before updating a host, the server checks that the agent runs the same version as the server and that the Docker API is 1.43 or newer. If not, the host is skipped and the notification says why |
-| R17 | Notifications go to a Discord webhook after each scheduled run, and after `hikifune run`; runs started in the web UI are seen there and send nothing. After the check run, each host gets one message listing Available. After the update run, each host gets one message listing Updated, Rolled back and Failed, plus the space that prune reclaimed. In both, Failed also lists containers whose registry check failed, with the reason. A host with nothing to say gets no message. A notification is sent once the run has ended and the next may start, so a slow webhook holds back no run. See [Notifications](#notifications) |
+| R17 | Notifications go to a Discord webhook after each scheduled run, and after `hikifune run`; runs started in the web UI are seen there and send nothing. After the check run, each host's embed lists Available. After the update run, each host's embed lists Updated, Rolled back and Failed, plus the space that prune reclaimed. In both, Failed also lists containers whose registry check failed, with the reason. A host with nothing to say is left out. How the embeds go into messages is in R19. A notification is sent once the run has ended and the next may start, so a slow webhook holds back no run. See [Notifications](#notifications) |
 | R18 | Every rolled back and failed container carries a short summary of why |
-| R19 | hikifune ships a default Discord template, and the template can be edited in the web UI. It is a Go `text/template` for the embed text, kept in the server state; it is saved only when it parses and renders a message of every kind. A template is bounded in size, in what it writes, in the numbers it names, in how deep its loops nest, in how many templates it enters and range turns it takes for one message (20,000), and in how long the strings it makes get, so a saved template cannot make the server spin or fill its memory. When it fails on a message, or writes nothing for one with something to say, the default writes that message. **Send test** posts a sample message with the template in the editor, saved or not, and tells a rate limit longer than its minute rather than wait it out |
+| R19 | hikifune ships a default Discord template, and the template can be edited in the web UI. It is a Go `text/template` for the embed text, kept in the server state; it is saved only when it parses and renders a message of every kind. A template is bounded in size, in what it writes, in the numbers it names, in how deep its loops nest, in how many templates it enters and range turns it takes for one message (20,000), and in how long the strings it makes get, so a saved template cannot make the server spin or fill its memory. When it fails on a message, or writes nothing for one with something to say, the default writes that message. **Send test** posts a sample message with the template in the editor, saved or not, and tells a rate limit longer than its minute rather than wait it out. A preview beside the editor renders it on each kind of sample message as it changes. A run's hosts share a message by default, an embed each (at most 10 embeds and 6,000 characters to a message, the rest in the next); Settings can give each host its own |
 | R20 | The old image is pruned after a successful update: the update leaves it, nameless once the pull moved its tag, and the host prunes its dangling images after its updates in a run (and `hikifune-agent update` after its own). A host held by another job or an update by hand is asked again until it is free, for as long as a job may take. The space reported is the larger of what the daemon says it reclaimed and how much the images' layers shrank, since Docker 24 says 0 and the containerd store counts only the unpacked layers. The notification carries it |
 | R21 | Written in Go. Images `hikifune` and `hikifune-agent` |
 | R22 | The new configuration keeps what was set on the container and drops what came from the old image. See [Building the new configuration](#building-the-new-configuration). Copying `Config` whole would pin the old image's defaults, so a new image that changes `PATH`, an entrypoint or its health check would never get the change |
@@ -114,33 +114,35 @@ Each call that changes a container (create, connect, stop, rename, start) is sen
 
 The default template follows the layout of the tugtainer messages it replaces (R17 to R19):
 
-- A header with the host name.
-- One section per list. A section with nothing in it is left out.
-- Each container as its name and image reference.
+- The host name as the embed's title.
+- One section per list, headed `🆕 Available:`, `✅ Updated:`, `🔁 Rolled back:` or `❌ Failed:`. A section with nothing in it is left out.
+- Each container as `` • **name** `image` ``.
 - Under each rolled back or failed container, the reason in one line.
-- The space prune reclaimed, after the update run.
-- A host skipped by the version check (R16) gets a message that says why.
+- `Total reclaimed space: …` at the end, after the update run.
+- A host skipped by the version check (R16) gets `⚠️ Left out:` and why.
 
-Example of an update run message:
+An update run's embed for one host, as Discord shows it, bold and code spans aside:
 
 ```
-hikifune · host-a
+host-a
 
-Updated
-• monitoring-prometheus-1  docker.io/prom/prometheus:main
+✅ Updated:
+• monitoring-prometheus-1 docker.io/prom/prometheus:main
 
-Rolled back
-• apps-web-1  ghcr.io/example/web:latest
+🔁 Rolled back:
+• apps-web-1 ghcr.io/example/web:latest
   not healthy 2m after start: health check exited with 1
 
-Failed
-• apps-tautulli-1  ghcr.io/tautulli/tautulli:latest
+❌ Failed:
+• apps-tautulli-1 ghcr.io/tautulli/tautulli:latest
   create refused: port 8181 is already allocated
 
-Reclaimed 4.8 GB
+Total reclaimed space: 4.8 GB
+
+update run · 01:04
 ```
 
-The message is a Discord embed sent under the hikifune name: the title is the host, the color the worst result (red for rolled back, failed or left out, green for updated, blue for available), the footer the run and its time. The template writes the embed text only. Text longer than an embed takes (4096 characters) goes in parts, cut at line ends. Container names go in code spans and other values are escaped, so Discord reads none of them as markdown, and the message pings no one. A rate limit is waited out as Discord asks, up to 5 minutes; a longer one fails the message, and so does one that would outlast the caller's deadline, such as Send test's minute. A server error is tried again, which could post a message twice if Discord took it before failing; Discord answers with the result, so this is rare.
+Each host with something to say is a Discord embed sent under the hikifune name: the title is the host, the color the worst result (red for rolled back, failed or left out, green for updated, blue for available), the footer the run and its time. By default the embeds of a run share messages, at most 10 embeds and 6,000 characters to a message, the rest going in the next; Settings can give each host its own message instead. The template writes the embed text only. Text longer than an embed takes (4096 characters) goes in parts, cut at line ends, and a single line longer than that in the middle. Container names and other values are escaped and image references go in code spans, so Discord reads none of them as markdown, and the message pings no one. A rate limit is waited out as Discord asks, up to 5 minutes; a longer one fails the message, and so does one that would outlast the caller's deadline, such as Send test's minute. A server error is tried again, which could post a message twice if Discord took it before failing; Discord answers with the result, so this is rare.
 
 ## Milestones
 
@@ -233,7 +235,7 @@ Done when: every container on every host appears, protected ones marked, and bot
 - The schedule's period per run: every day, a weekday, or a day of the month (R6).
 - Splits a host's message when it is longer than Discord allows.
 
-Done when: a check run sends one Available message per host, an update run with updated, rolled back and failed containers sends one message per host with every reason, and an edited template is used.
+Done when: a check run sends what is available on each host, an update run with updated, rolled back and failed containers sends them for each host with every reason, and an edited template is used.
 
 ### M7. Release candidate
 
@@ -246,12 +248,10 @@ Done when: a fresh install from the README works on a clean Docker-in-Docker hos
 
 ### M8. Rollout
 
-- Run hikifune check-only (R35) next to the old updater and compare the lists of available updates.
-- Turn updates on host by host.
-- Remove the old updater.
-- Release v0.1.0.
+- Release v0.1.0 straight after M7. The old updater was removed on 2026-11-17 before hikifune ran anywhere, so there is no list of its own to compare with, and the check-only run beside it was dropped.
+- Install the server and an agent on every host, with updates on from the start. Only the access paths (the VPN client and the socket proxy) are protected.
 
-Done when: a week of scheduled runs with no failure left unexplained, and the old updater is gone.
+Done when: a week of scheduled runs with no failure left unexplained.
 
 ## Open questions
 

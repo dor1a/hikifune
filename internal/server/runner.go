@@ -45,6 +45,10 @@ type Runner struct {
 	// Notify, when set, gets each run of Run and RunIf once it is recorded
 	// and the next run may start (R17). Runs started by hand are not given.
 	Notify func(ctx context.Context, run store.Run)
+	// NotifyAfter sends in the background, in the order the runs ended, so
+	// RunIf returns at once and a slow webhook holds back no scheduled run.
+	// A long-lived server sets it; a one-off command waits for its message.
+	NotifyAfter bool
 
 	dial func(store.Agent) (agentAPI, error)
 	now  func() time.Time
@@ -52,6 +56,8 @@ type Runner struct {
 
 	amu    sync.Mutex
 	active *Activity
+	// sent is closed when the last background message is done.
+	sent chan struct{}
 }
 
 // Spec is what one run covers.
@@ -201,7 +207,21 @@ func (r *Runner) RunIf(ctx context.Context, kind string, still func() bool) (run
 	r.mu.Unlock()
 	// Sent with the lock released, so a slow webhook holds back no run.
 	if err == nil && r.Notify != nil {
-		r.Notify(ctx, run)
+		if !r.NotifyAfter {
+			r.Notify(ctx, run)
+			return run, true, err
+		}
+		r.amu.Lock()
+		prev, done := r.sent, make(chan struct{})
+		r.sent = done
+		r.amu.Unlock()
+		go func() {
+			defer close(done)
+			if prev != nil {
+				<-prev
+			}
+			r.Notify(ctx, run)
+		}()
 	}
 	return run, true, err
 }
