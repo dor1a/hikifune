@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -150,6 +152,98 @@ func TestUpdateRefusesBadRequestsAndRecreatedContainers(t *testing.T) {
 	json.Unmarshal(body, &job)
 	if job.Result == nil || job.Result.Outcome != update.Updated || target != "id-web" || job.Result.Container != "web" {
 		t.Fatalf("same container: %s, updated %q", body, target)
+	}
+}
+
+// A job number the server chose: the same request again, after its answer
+// was lost, gets that job, running or finished, and starts nothing new.
+func TestTheServersJobNumber(t *testing.T) {
+	a, release, srv := fakeAgent(t)
+	auth := "Bearer " + token
+	const n = "0123456789abcdef0123456789abcdef"
+	starts := 0
+	inner := a.update
+	a.update = func(ctx context.Context, name string, watch time.Duration) update.Result {
+		starts++
+		return inner(ctx, name, watch)
+	}
+	req := `{"container":"web","job":"` + n + `"}`
+	for range 2 {
+		code, body := call(t, srv, "POST", protocol.PathUpdates, auth, req)
+		var job protocol.Job
+		json.Unmarshal(body, &job)
+		if code != http.StatusAccepted || job.ID != n || job.Container != "web" {
+			t.Fatalf("start: %d %s", code, body)
+		}
+	}
+	if code, body := call(t, srv, "POST", protocol.PathUpdates, auth, `{"container":"db","job":"`+n+`"}`); code != http.StatusConflict {
+		t.Fatalf("the number of another container's job: %d %s", code, body)
+	}
+	close(release)
+	a.Wait()
+	code, body := call(t, srv, "POST", protocol.PathUpdates, auth, req)
+	var job protocol.Job
+	json.Unmarshal(body, &job)
+	if code != http.StatusAccepted || job.State != protocol.JobDone || starts != 1 {
+		t.Fatalf("after it finished: %d %s, %d starts", code, body, starts)
+	}
+	for _, bad := range []string{"0123456789abcde", strings.Repeat("A", 32), strings.Repeat("0", 65), "../" + n} {
+		if code, _ := call(t, srv, "POST", protocol.PathUpdates, auth, `{"container":"web","job":"`+bad+`"}`); code != http.StatusBadRequest {
+			t.Errorf("job %q: %d", bad, code)
+		}
+	}
+	// Once its result left the kept jobs, the number is refused, not run
+	// again.
+	for i := range keepJobs {
+		code, body := call(t, srv, "POST", protocol.PathUpdates, auth, fmt.Sprintf(`{"container":"web","job":"%032x"}`, i+1))
+		if code != http.StatusAccepted {
+			t.Fatalf("job %d: %d %s", i+1, code, body)
+		}
+		a.Wait()
+	}
+	if code, body := call(t, srv, "POST", protocol.PathUpdates, auth, req); code != http.StatusConflict || !strings.Contains(string(body), "already ran") {
+		t.Fatalf("a number whose result is gone: %d %s", code, body)
+	}
+}
+
+// The host lock goes before a job shows as done, so the prune the server
+// sends once it sees that finds the host free.
+func TestAPruneRightAfterAJobFindsTheHostFree(t *testing.T) {
+	a, release, srv := fakeAgent(t)
+	a.lockPath = filepath.Join(t.TempDir(), "lock")
+	auth := "Bearer " + token
+	for i := range 50 {
+		code, body := call(t, srv, "POST", protocol.PathUpdates, auth, `{"container":"web"}`)
+		var job protocol.Job
+		json.Unmarshal(body, &job)
+		if code != http.StatusAccepted {
+			t.Fatalf("start %d: %d %s", i, code, body)
+		}
+		release <- struct{}{}
+		for job.State != protocol.JobDone {
+			_, body = call(t, srv, "GET", protocol.PathUpdates+"/"+job.ID, auth, "")
+			json.Unmarshal(body, &job)
+		}
+		if code, body := call(t, srv, "POST", protocol.PathPrune, auth, ""); code != http.StatusOK {
+			t.Fatalf("prune right after job %d: %d %s", i, code, body)
+		}
+	}
+	a.Wait()
+}
+
+// The version answer carries the agent's boot, new at each start.
+func TestTheVersionCarriesTheBoot(t *testing.T) {
+	a, _, srv := fakeAgent(t)
+	a.boot = "this-start"
+	_, body := call(t, srv, "GET", protocol.PathVersion, "Bearer "+token, "")
+	var v protocol.Version
+	if err := json.Unmarshal(body, &v); err != nil || v.Boot != "this-start" {
+		t.Fatalf("version %s", body)
+	}
+	b, err := New(context.Background(), Config{Token: token, Docker: &docker.Client{}, Registry: registry.New(nil, nil)})
+	c, err2 := New(context.Background(), Config{Token: token, Docker: &docker.Client{}, Registry: registry.New(nil, nil)})
+	if err != nil || err2 != nil || b.boot == "" || b.boot == c.boot {
+		t.Fatalf("boots %q and %q: %v %v", b.boot, c.boot, err, err2)
 	}
 }
 

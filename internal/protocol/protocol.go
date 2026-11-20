@@ -31,6 +31,10 @@ type Version struct {
 	// needs; DockerError says why not otherwise.
 	Docker      *inventory.Docker `json:"docker,omitempty"`
 	DockerError string            `json:"docker_error,omitempty"`
+	// Boot is new each time the agent starts. Jobs and their numbers live in
+	// memory, so a server that sees another Boot does not send a lost
+	// request again: the agent that may have taken it is gone.
+	Boot string `json:"boot,omitempty"`
 }
 
 // Checked is one container in a check report.
@@ -67,6 +71,24 @@ type UpdateRequest struct {
 	// WatchSeconds is how long the new container is watched; zero means the
 	// agent's default.
 	WatchSeconds int `json:"watch_seconds,omitempty"`
+	// Job is the job number the server chose, 16 to 64 lowercase hex
+	// digits; empty lets the agent choose. With it, a server that lost the
+	// answer asks for the job by that number, and a request sent again for
+	// a number the agent has gets that job instead of a new one (R32).
+	Job string `json:"job,omitempty"`
+}
+
+// ValidJob tells whether id may be a job number the server chose.
+func ValidJob(id string) bool {
+	if len(id) < 16 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // JobState is where an update job is.

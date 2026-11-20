@@ -36,6 +36,7 @@ import (
 	"github.com/dor1a/hikifune/internal/agent"
 	"github.com/dor1a/hikifune/internal/buildinfo"
 	"github.com/dor1a/hikifune/internal/docker"
+	"github.com/dor1a/hikifune/internal/hostlock"
 	"github.com/dor1a/hikifune/internal/inventory"
 	"github.com/dor1a/hikifune/internal/registry"
 	"github.com/dor1a/hikifune/internal/update"
@@ -117,7 +118,7 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	a, err := agent.New(ctx, agent.Config{Docker: d, Registry: reg, Auth: pullAuth(reg, keys),
-		Token: os.Getenv("HIKIFUNE_AGENT_TOKEN")})
+		Token: os.Getenv("HIKIFUNE_AGENT_TOKEN"), LockPath: hostlock.Path})
 	if err != nil {
 		return err
 	}
@@ -193,6 +194,16 @@ func runUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The agent's jobs hold the same lock, so run this with docker exec in
+	// the agent's container to keep the two apart.
+	lock, err := hostlock.Try(hostlock.Path)
+	switch {
+	case errors.Is(err, hostlock.ErrBusy):
+		return errors.New("the agent is running a job on this host; try again when it ends")
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "warning: cannot take the host lock (%s); the agent could start a job at the same time\n", hostlock.Hint(hostlock.Path, err))
+	}
+	defer lock.Release()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	res := update.Container(ctx, d, fs.Arg(0), update.Options{Watch: *watch, Auth: pullAuth(reg, keys), Check: reg.Check})

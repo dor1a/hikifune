@@ -136,13 +136,72 @@ func TestTemplateLimits(t *testing.T) {
 		`{{$x := "ab"}}{{range 100}}{{$x = print $x $x}}{{end}}{{$x}}`:                                                                      "more than",
 		`{{$x := "\\"}}{{range 100}}{{$x = md $x}}{{end}}{{$x}}`:                                                                            "more than",
 		"{{if .LeftOut}}{{(index .Updated 0).Container}}{{end}}x":                                                                           "left-out host",
+		"{{if .Failed}}{{(index .Available 0).Container}}{{end}}x":                                                                          "check message of failures",
+		`{{if and (eq .Kind "update") .Failed}}{{(index .RolledBack 0).Container}}{{end}}x`:                                                 "update message of failures only",
+		`{{if and (eq .Kind "update") .RolledBack}}{{(index .Failed 0).Container}}{{end}}x`:                                                 "update message of rollbacks only",
+		`{{printf "%201[1]s" "x"}}`: "widths and precisions",
 	} {
 		if _, err := Parse(text); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%.50s: err %v, want %q", text, err, want)
 		}
 	}
-	if _, err := Parse(`{{range .Available}}{{printf "%-30s" .Container}}{{end}} {{range 3}}.{{end}}`); err != nil {
+	if _, err := Parse(`{{range .Available}}{{printf "%-30s" .Container}}{{end}} {{range 3}}.{{end}}{{printf "%20[1]s %-8[2]s" .Host .Kind}}`); err != nil {
 		t.Errorf("a template within the limits: %v", err)
+	}
+}
+
+// Templates that each call the next four times take no loop and pass the
+// nesting limit, yet the last one runs 4^7 times.
+func TestManyCallsAreRefused(t *testing.T) {
+	var b strings.Builder
+	for i := range 8 {
+		fmt.Fprintf(&b, `{{define "t%d"}}`, i)
+		if i < 7 {
+			fmt.Fprintf(&b, `{{template "t%d"}}{{template "t%d"}}{{template "t%d"}}{{template "t%d"}}`, i+1, i+1, i+1, i+1)
+		}
+		b.WriteString(`{{end}}`)
+	}
+	b.WriteString(`{{template "t0"}}ok`)
+	start := time.Now()
+	_, err := Parse(b.String())
+	if err == nil || !strings.Contains(err.Error(), errTooMuchWork.Error()) {
+		t.Fatalf("err %v, want %v", err, errTooMuchWork)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("refusing took %s", d)
+	}
+	// Six levels stay under the limit.
+	ok := strings.Replace(strings.Replace(b.String(), `{{template "t7"}}`, "", -1), `{{define "t7"}}{{end}}`, "", 1)
+	if _, err := Parse(ok); err != nil {
+		t.Errorf("4^6 calls: %v", err)
+	}
+}
+
+// Each message counts its own steps, so a long run of messages is not cut
+// short, and messages may render at once.
+func TestStepsAreCountedPerMessage(t *testing.T) {
+	tmpl, err := Parse(`{{range .Failed}}{{.Container}}{{end}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Message{Host: "a", Kind: "update"}
+	for i := range maxSteps / 2 {
+		m.Failed = append(m.Failed, Item{Container: fmt.Sprint(i % 10)})
+	}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := Render(tmpl, m); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	m.Failed = append(m.Failed, m.Failed...)
+	if _, err := Render(tmpl, m); err == nil || !strings.Contains(err.Error(), errTooMuchWork.Error()) {
+		t.Errorf("err %v, want %v", err, errTooMuchWork)
 	}
 }
 
@@ -339,6 +398,13 @@ func TestALongRateLimitIsWaitedOutOrRefused(t *testing.T) {
 	hits, retry, waits = 0, "600", nil
 	if err := d.Post(context.Background(), embed{Title: "a"}); err == nil || !strings.Contains(err.Error(), "10m0s") || hits != 1 || len(waits) != 0 {
 		t.Fatalf("600s: err %v, waits %v, hits %d", err, waits, hits)
+	}
+	// Send test gives a minute: 90 seconds are told, not waited for.
+	hits, retry, waits = 0, "90", nil
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := d.Post(ctx, embed{Title: "a"}); err == nil || !strings.Contains(err.Error(), "1m30s") || hits != 1 || len(waits) != 0 {
+		t.Fatalf("90s within a minute: err %v, waits %v, hits %d", err, waits, hits)
 	}
 }
 

@@ -106,8 +106,28 @@ func (c *Client) Check(ctx context.Context, t Target) Result {
 		return Result{Status: UpdateAvailable, RemoteDigest: remote, Reason: moved}
 	}
 	if len(local) == 0 {
-		return Result{Status: NotCheckable,
-			Reason: "the image has no repo digest for " + ref.Name() + ", so it was built on this host or never pulled from there"}
+		lost := "the image has no repo digest for " + ref.Name()
+		if !validDigest(t.ImageID) {
+			return Result{Status: NotCheckable, Reason: lost + ", so it was built on this host or never pulled from there"}
+		}
+		// With the containerd store the image ID of a pulled image is the
+		// digest that was pulled, so an image that lost its repo digests is
+		// still known to the registry by its ID (R25). A local build, or any
+		// image on the classic store, has an ID the registry does not know.
+		remote, err := c.Digest(ctx, ref)
+		switch {
+		case IsNotCheckable(err):
+			return Result{Status: NotCheckable, Reason: lost + ", and " + err.Error()}
+		case err != nil:
+			return Result{Status: Failed, Reason: lost + ", and " + err.Error()}
+		case remote == t.ImageID:
+			return Result{Status: UpToDate, LocalDigest: remote, RemoteDigest: remote}
+		}
+		if r, ok := c.fromRegistry(ctx, ref, []string{t.ImageID}, lost+" and the registry does not have its image ID"); !ok {
+			r.RemoteDigest = remote
+			return r
+		}
+		return Result{Status: UpdateAvailable, LocalDigest: t.ImageID, RemoteDigest: remote}
 	}
 	remote, err := c.Digest(ctx, ref)
 	switch {

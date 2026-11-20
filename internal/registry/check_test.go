@@ -74,6 +74,18 @@ func TestCheck(t *testing.T) {
 		{"the image ID is the pulled digest (containerd store)",
 			Target{Image: h + "/team/app:1", RepoDigests: app(digestB), ImageID: digestA},
 			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
+		{"no repo digest, and the image ID is what the tag names (containerd store)",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, ImageID: digestA},
+			Result{Status: UpToDate, LocalDigest: digestA, RemoteDigest: digestA}},
+		{"no repo digest, and the registry had the image ID before (containerd store)",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, ImageID: digestB},
+			Result{Status: UpdateAvailable, LocalDigest: digestB, RemoteDigest: digestA}},
+		{"no repo digest, and an image ID the registry never had (classic store, local build)",
+			Target{Image: h + "/team/app:1", RepoDigests: []string{}, ImageID: digestC},
+			Result{Status: NotCheckable, RemoteDigest: digestA}},
+		{"no repo digest, and a registry error",
+			Target{Image: h + "/team/down:1", RepoDigests: []string{}, ImageID: digestA},
+			Result{Status: Failed}},
 	}
 	for _, tt := range tests {
 		got := c.Check(context.Background(), tt.target)

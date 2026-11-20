@@ -18,6 +18,9 @@ import (
 // Agent is one agent the server dials (R26). Token is sent as is, so the
 // file that holds it is readable by the server's user only.
 type Agent struct {
+	// ID is new at each agent add, so an agent added again under a name is
+	// told from the one before it whatever the clocks say.
+	ID    string    `json:"id,omitempty"`
 	Name  string    `json:"name"`
 	URL   string    `json:"url"`
 	Token string    `json:"token"`
@@ -38,9 +41,11 @@ type Settings struct {
 	// the month (1 to 31); empty is every day.
 	CheckEvery  string `json:"check_every,omitempty"`
 	UpdateEvery string `json:"update_every,omitempty"`
-	// SavedAt is when the schedule was last saved or reset; a changed time
-	// counts from then.
-	SavedAt time.Time `json:"saved_at,omitzero"`
+	// CheckSavedAt and UpdateSavedAt are when each schedule was last changed
+	// or reset in the web UI; a changed time counts from then. Each has its
+	// own, so saving one schedule leaves the other's count alone.
+	CheckSavedAt  time.Time `json:"check_saved_at,omitzero"`
+	UpdateSavedAt time.Time `json:"update_saved_at,omitzero"`
 	// Template is the notification template; empty means the default (R19).
 	Template string `json:"template,omitempty"`
 }
@@ -102,7 +107,9 @@ type Run struct {
 
 // Failure is a digest whose update failed; the next run skips it (R15).
 type Failure struct {
-	Agent     string    `json:"agent"`
+	Agent string `json:"agent"`
+	// AgentID is the ID of the agent the failure happened on (Agent.ID).
+	AgentID   string    `json:"agent_id,omitempty"`
 	Container string    `json:"container"`
 	Digest    string    `json:"digest"`
 	At        time.Time `json:"at"`

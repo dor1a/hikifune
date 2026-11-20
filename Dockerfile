@@ -13,11 +13,16 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath \
       -ldflags "-s -w -X github.com/dor1a/hikifune/internal/buildinfo.Version=${VERSION}" \
       -o /out/ ./cmd/... \
- && mkdir -p /out/data
+ && mkdir -p /out/data /out/rootfs/tmp \
+ && chmod 1777 /out/rootfs/tmp
 
 FROM scratch AS agent
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/hikifune-agent /hikifune-agent
+# The host lock lives here, shared by the agent's jobs and an update by hand
+# through docker exec; writable by any user the agent runs as. Copied with its
+# parent, since COPY of a directory copies only what is in it.
+COPY --from=build /out/rootfs/ /
 USER 65532:65532
 ENV HIKIFUNE_AGENT_LISTEN=:7778
 EXPOSE 7778

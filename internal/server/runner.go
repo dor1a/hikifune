@@ -146,9 +146,37 @@ type hostResult struct {
 	run  store.HostRun
 	drop map[string]bool // failure keys to remove
 	add  []store.Failure
+	// agent is the agent the run used; its part changes failures only while
+	// that same agent is registered.
+	agent store.Agent
 }
 
 func failureKey(f store.Failure) string { return f.Agent + "\x00" + f.Container + "\x00" + f.Digest }
+
+// current tells whether f belongs to the agent registered now under its
+// name (belongs).
+func current(agents []store.Agent, f store.Failure) bool {
+	i := slices.IndexFunc(agents, func(a store.Agent) bool { return a.Name == f.Agent })
+	return i >= 0 && belongs(agents[i], f)
+}
+
+// belongs tells whether f happened on agent a and not on an earlier agent
+// of its name: by ID, or for an agent added before agents had one, by the
+// time it was added.
+func belongs(a store.Agent, f store.Failure) bool {
+	if f.Agent != a.Name {
+		return false
+	}
+	if a.ID != "" {
+		return f.AgentID == a.ID
+	}
+	return !f.At.Before(a.Added)
+}
+
+// sameAgent tells whether a and b are the one registration.
+func sameAgent(a, b store.Agent) bool {
+	return a.Name == b.Name && a.ID == b.ID && a.Added.Equal(b.Added)
+}
 
 // Run runs one check or update run over every agent, the agents at the same
 // time, and records it (R31). It waits for a run going on to end first.
@@ -218,19 +246,25 @@ func (r *Runner) run(ctx context.Context, spec Spec) (store.Run, error) {
 	}
 	err = r.Store.Update(func(s *store.State) error {
 		s.Runs = append(s.Runs, run)
-		// An agent removed during the run, or added again under the same
-		// name, is another host now: its part of the run changes no
+		// An agent removed since the run read it, or added again under the
+		// same name, is another host now: its part of the run changes no
 		// failure.
-		same := func(name string) bool {
-			i := slices.IndexFunc(s.Agents, func(a store.Agent) bool { return a.Name == name })
-			return i >= 0 && !s.Agents[i].Added.After(run.Started)
+		same := func(h hostResult) bool {
+			i := slices.IndexFunc(s.Agents, func(a store.Agent) bool { return a.Name == h.run.Agent })
+			return i >= 0 && sameAgent(s.Agents[i], h.agent)
 		}
 		kept := s.Failed[:0:0]
 		have := map[string]bool{}
 		for _, f := range s.Failed {
+			// A failure of a removed agent, or of an earlier agent of the
+			// same name, goes; agent remove leaves one behind when its
+			// second file fails to write.
+			if !current(s.Agents, f) {
+				continue
+			}
 			drop := false
 			for _, h := range results {
-				drop = drop || h.drop[failureKey(f)] && same(h.run.Agent)
+				drop = drop || h.drop[failureKey(f)] && same(h)
 			}
 			if !drop {
 				kept = append(kept, f)
@@ -238,7 +272,7 @@ func (r *Runner) run(ctx context.Context, spec Spec) (store.Run, error) {
 			}
 		}
 		for _, h := range results {
-			if !same(h.run.Agent) {
+			if !same(h) {
 				continue
 			}
 			for _, f := range h.add {
@@ -257,7 +291,7 @@ func (r *Runner) run(ctx context.Context, spec Spec) (store.Run, error) {
 // host runs one agent's part.
 func (r *Runner) host(ctx context.Context, spec Spec, a store.Agent, failed []store.Failure) hostResult {
 	kind := spec.Kind
-	res := hostResult{run: store.HostRun{Agent: a.Name}, drop: map[string]bool{}}
+	res := hostResult{run: store.HostRun{Agent: a.Name}, drop: map[string]bool{}, agent: a}
 	hr := &res.run
 	api, err := r.agent(a)
 	if err != nil {
@@ -301,7 +335,7 @@ func (r *Runner) host(ctx context.Context, spec Spec, a store.Agent, failed []st
 		byName[c.Name] = c
 	}
 	for _, f := range failed {
-		if f.Agent != a.Name {
+		if !belongs(a, f) {
 			continue
 		}
 		prior[f.Container+"@"+f.Digest] = f
@@ -370,7 +404,7 @@ func (r *Runner) host(ctx context.Context, spec Spec, a store.Agent, failed []st
 		if spec.Container == "" {
 			still = func() bool { return !r.checkOnlyNow(a.Name) }
 		}
-		job, err := r.updateOne(ctx, api, c, still)
+		job, err := r.updateOne(ctx, api, c, still, v.Boot)
 		if !job.Started.IsZero() {
 			e.Started, e.Finished = &job.Started, job.Finished
 		}
@@ -397,7 +431,7 @@ func (r *Runner) host(ctx context.Context, spec Spec, a store.Agent, failed []st
 			}
 		case update.Failed, update.RolledBack:
 			if digest != "" {
-				res.add = append(res.add, store.Failure{Agent: a.Name, Container: c.Name,
+				res.add = append(res.add, store.Failure{Agent: a.Name, AgentID: a.ID, Container: c.Name,
 					Digest: digest, At: r.clock(), Reason: job.Result.Reason})
 			}
 		}
@@ -431,12 +465,12 @@ var errCheckOnly = errors.New("the check-only switch was turned on")
 // still, when set, is asked before each time the update is sent, so a
 // check-only switch turned on meanwhile keeps it from going. When the agent
 // is busy with another job, it waits for that one and tries once more.
-func (r *Runner) updateOne(ctx context.Context, api agentAPI, c protocol.Checked, still func() bool) (protocol.Job, error) {
+func (r *Runner) updateOne(ctx context.Context, api agentAPI, c protocol.Checked, still func() bool, boot string) (protocol.Job, error) {
 	if still != nil && !still() {
 		return protocol.Job{}, errCheckOnly
 	}
-	req := protocol.UpdateRequest{Container: c.Name, ID: c.ID, WatchSeconds: int(r.Watch / time.Second)}
-	job, err := api.StartUpdate(ctx, req)
+	req := protocol.UpdateRequest{Container: c.Name, ID: c.ID, WatchSeconds: int(r.Watch / time.Second), Job: newJob()}
+	err := r.start(ctx, api, req, still, boot)
 	var se *StatusError
 	if errors.As(err, &se) && se.Status == http.StatusConflict && se.Body.Busy != nil {
 		if _, err := r.wait(ctx, api, se.Body.Busy.ID); err != nil {
@@ -445,24 +479,104 @@ func (r *Runner) updateOne(ctx context.Context, api agentAPI, c protocol.Checked
 		if still != nil && !still() {
 			return protocol.Job{}, errCheckOnly
 		}
-		job, err = api.StartUpdate(ctx, req)
+		err = r.start(ctx, api, req, still, boot)
 	}
 	if err != nil {
 		return protocol.Job{}, fmt.Errorf("start the update: %w", err)
 	}
-	return r.wait(ctx, api, job.ID)
+	return r.wait(ctx, api, req.Job)
+}
+
+// sends is how many times start sends one request whose answer is lost.
+const sends = 3
+
+// start sends req. When the answer is lost, or comes back as a server
+// error from something between the two, the agent may have taken the job
+// anyway: the job number is the server's, so it asks for the job until the
+// agent says whether it has it, and sends the request again only when it
+// does not. An agent that has the job answers a request sent again with it
+// rather than start another (R32). still is asked before each send again,
+// as before the first, and an agent that restarted since the check (its
+// Version.Boot is no longer boot) is not sent it again: the one that may
+// have taken it is gone, and the next check shows where the container is.
+func (r *Runner) start(ctx context.Context, api agentAPI, req protocol.UpdateRequest, still func() bool, boot string) error {
+	var err error
+	for i := range sends {
+		if i > 0 {
+			if still != nil && !still() {
+				return errCheckOnly
+			}
+			if boot != "" {
+				v, verr := api.Version(ctx)
+				switch {
+				case verr != nil:
+					return err
+				case v.Boot != boot:
+					return fmt.Errorf("%w; the agent restarted since, so it is not sent again, and the next check shows where the container is", err)
+				}
+			}
+		}
+		_, err = api.StartUpdate(ctx, req)
+		var se *StatusError
+		if err == nil || ctx.Err() != nil || errors.As(err, &se) && se.Status < http.StatusInternalServerError {
+			return err
+		}
+		has, answered := r.has(ctx, api, req.Job)
+		switch {
+		case has:
+			return nil
+		case !answered:
+			// Whether the agent took the job is not known.
+			return err
+		}
+	}
+	return err
+}
+
+// has asks the agent for job id until it answers whether it has the job,
+// for as long as a job may take.
+func (r *Runner) has(ctx context.Context, api agentAPI, id string) (has, answered bool) {
+	ctx, cancel := context.WithTimeout(ctx, r.watch()+jobSlack)
+	defer cancel()
+	for {
+		_, err := api.Job(ctx, id)
+		var se *StatusError
+		switch {
+		case err == nil:
+			return true, true
+		case errors.As(err, &se) && se.Status == http.StatusNotFound:
+			return false, true
+		}
+		if sleep(ctx, r.poll()) != nil {
+			return false, false
+		}
+	}
+}
+
+func (r *Runner) poll() time.Duration {
+	if r.Poll <= 0 {
+		return DefaultPoll
+	}
+	return r.Poll
+}
+
+func (r *Runner) watch() time.Duration {
+	if r.Watch <= 0 {
+		return update.DefaultWatch
+	}
+	return r.Watch
+}
+
+// newJob is a job number for an agent (protocol.ValidJob).
+func newJob() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (r *Runner) wait(ctx context.Context, api agentAPI, id string) (protocol.Job, error) {
-	poll := r.Poll
-	if poll <= 0 {
-		poll = DefaultPoll
-	}
-	watch := r.Watch
-	if watch <= 0 {
-		watch = update.DefaultWatch
-	}
-	ctx, cancel := context.WithTimeout(ctx, watch+jobSlack)
+	poll := r.poll()
+	ctx, cancel := context.WithTimeout(ctx, r.watch()+jobSlack)
 	defer cancel()
 	var last protocol.Job
 	var lastErr error

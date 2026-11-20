@@ -267,18 +267,18 @@ func agentCommand(args []string) error {
 		if _, err := server.NewClient(url, ""); err != nil {
 			return err
 		}
-		b := make([]byte, 32)
+		b := make([]byte, 40)
 		if _, err := rand.Read(b); err != nil {
 			return err
 		}
-		token := hex.EncodeToString(b)
+		token, id := hex.EncodeToString(b[:32]), hex.EncodeToString(b[32:])
 		err := st.Update(func(s *store.State) error {
 			for _, a := range s.Agents {
 				if a.Name == name {
 					return fmt.Errorf("an agent named %s exists; remove it first", name)
 				}
 			}
-			s.Agents = append(s.Agents, store.Agent{Name: name, URL: url, Token: token, Added: time.Now().UTC()})
+			s.Agents = append(s.Agents, store.Agent{ID: id, Name: name, URL: url, Token: token, Added: time.Now().UTC()})
 			return nil
 		})
 		if err != nil {

@@ -146,8 +146,9 @@ const Default = `{{define "items"}}{{range .}}• ` + "`{{.Container}}`" + ` {{m
 
 // Limits on a template, which is kept in the state and run for every
 // message: its size, what it may write, the numbers it may name, how deep
-// its loops nest and how wide printf may pad. Together they keep a template
-// from making the server spin or fill its memory.
+// its loops nest, how much work one message may take and how wide printf
+// may pad. Together they keep a template from making the server spin or
+// fill its memory.
 const (
 	MaxTemplate = 10000
 	// maxOutput bounds a whole message, which a host with many failures
@@ -156,8 +157,19 @@ const (
 	maxString = 64 << 10
 	maxNumber = 100
 	maxRanges = 2
-	maxWidth  = 200
+	// maxSteps bounds the templates entered and the range turns of one
+	// message. A few templates that each call the next several times take
+	// no loop, yet multiply the calls.
+	maxSteps = 20000
+	maxWidth = 200
 )
+
+// stepFunc is the function counted at each step. Parse puts a call to it at
+// the top of every template and range body; Render gives each message its
+// own count.
+const stepFunc = "hikifune_step"
+
+var errTooMuchWork = fmt.Errorf("the template enters templates and turns ranges more than %d times for one message", maxSteps)
 
 var defaultTemplate = sync.OnceValue(func() *template.Template {
 	t, err := Parse("")
@@ -185,6 +197,11 @@ func Parse(text string) (*template.Template, error) {
 		return nil, err
 	} else if d > maxRanges {
 		return nil, fmt.Errorf("range is nested %d deep, counting the templates it calls; at most %d", d, maxRanges)
+	}
+	for _, tt := range t.Templates() {
+		if tt.Tree != nil {
+			countSteps(tt.Tree, tt.Tree.Root)
+		}
 	}
 	for _, m := range samples() {
 		if _, err := Render(t, m); err != nil {
@@ -277,6 +294,40 @@ func (c *checker) node(n parse.Node) (int, error) {
 	return deepest, err
 }
 
+// countSteps puts a call to stepFunc at the top of list, a template's root
+// or a range body, and of every range body under it.
+func countSteps(tr *parse.Tree, list *parse.ListNode) {
+	if list == nil {
+		return
+	}
+	rangeBodies(tr, list)
+	pos := list.Pos
+	call := &parse.ActionNode{NodeType: parse.NodeAction, Pos: pos, Pipe: &parse.PipeNode{NodeType: parse.NodePipe, Pos: pos,
+		Cmds: []*parse.CommandNode{{NodeType: parse.NodeCommand, Pos: pos,
+			Args: []parse.Node{parse.NewIdentifier(stepFunc).SetTree(tr).SetPos(pos)}}}}}
+	list.Nodes = append([]parse.Node{call}, list.Nodes...)
+}
+
+// rangeBodies finds the range bodies under list, inside if and with too.
+func rangeBodies(tr *parse.Tree, list *parse.ListNode) {
+	if list == nil {
+		return
+	}
+	for _, n := range list.Nodes {
+		switch n := n.(type) {
+		case *parse.IfNode:
+			rangeBodies(tr, n.List)
+			rangeBodies(tr, n.ElseList)
+		case *parse.WithNode:
+			rangeBodies(tr, n.List)
+			rangeBodies(tr, n.ElseList)
+		case *parse.RangeNode:
+			countSteps(tr, n.List)
+			rangeBodies(tr, n.ElseList)
+		}
+	}
+}
+
 // branch measures an if, with or range; a range adds one level to its body.
 func (c *checker) branch(b *parse.BranchNode, deepest *int, add int) error {
 	for _, n := range []parse.Node{b.Pipe, b.List, b.ElseList} {
@@ -346,7 +397,13 @@ func boundedPrintf(format string, args ...any) (string, error) {
 				}
 			case c == '.':
 				num = 0
-			case strings.IndexByte("+-# []", c) >= 0:
+			case c == '[':
+				// An argument index, such as %20[1]s, is not a width.
+				for i < len(format) && format[i] != ']' {
+					i++
+				}
+				num = 0
+			case strings.IndexByte("+-# ", c) >= 0:
 			default:
 				break spec
 			}
@@ -367,10 +424,22 @@ func (w *boundedWriter) Write(p []byte) (int, error) {
 	return w.Builder.Write(p)
 }
 
-// Render runs the template for one message.
+// Render runs a template from Parse for one message. It runs a copy that
+// counts the steps of this message alone, so messages may render at once.
 func Render(t *template.Template, m Message) (string, error) {
+	c, err := t.Clone()
+	if err != nil {
+		return "", err
+	}
+	steps := 0
+	c.Funcs(template.FuncMap{stepFunc: func() (string, error) {
+		if steps++; steps > maxSteps {
+			return "", errTooMuchWork
+		}
+		return "", nil
+	}})
 	var b boundedWriter
-	if err := t.Execute(&b, m); err != nil {
+	if err := c.Execute(&b, m); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(b.String()), nil
@@ -414,8 +483,11 @@ func samples() []Message {
 	return []Message{
 		all,
 		{Host: "check message", Kind: "check", At: all.At, Available: all.Available},
+		{Host: "check message of failures", Kind: "check", At: all.At, Failed: all.Failed},
 		{Host: "update message", Kind: "update", At: all.At, Updated: all.Updated},
 		{Host: "message of failures", Kind: "update", At: all.At, RolledBack: all.RolledBack, Failed: all.Failed},
+		{Host: "update message of failures only", Kind: "update", At: all.At, Failed: all.Failed},
+		{Host: "update message of rollbacks only", Kind: "update", At: all.At, RolledBack: all.RolledBack},
 		{Host: "left-out host", Kind: "check", At: all.At, LeftOut: "the agent runs v0.1.0 and the server v0.2.0"},
 		{Host: "message with a note", Kind: "update", At: all.At, Reclaimed: all.Reclaimed, Note: "prune: the daemon refused"},
 	}

@@ -41,9 +41,11 @@ type Runner interface {
 	Active() *server.Activity
 }
 
-// Schedule gives the check and update schedules in force.
+// Schedule gives the check and update schedules in force, and those that
+// would be with other settings saved.
 type Schedule interface {
 	Times() (check, update server.When)
+	TimesFor(set store.Settings) (check, update server.When)
 }
 
 // Config is what the pages need.
@@ -742,13 +744,23 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.cfg.Store.Update(func(st *store.State) error {
 		set := &st.Settings
-		set.SavedAt = s.now().UTC()
+		oldCheck, oldUpdate := s.cfg.Schedule.TimesFor(*set)
 		if reset {
 			set.Saved, set.CheckAt, set.UpdateAt, set.CheckEvery, set.UpdateEvery = false, "", "", "", ""
-			return nil
+		} else {
+			set.Saved, set.CheckAt, set.UpdateAt = true, check.At.String(), upd.At.String()
+			set.CheckEvery, set.UpdateEvery = check.Every.String(), upd.Every.String()
 		}
-		set.Saved, set.CheckAt, set.UpdateAt = true, check.At.String(), upd.At.String()
-		set.CheckEvery, set.UpdateEvery = check.Every.String(), upd.Every.String()
+		// Only a schedule that changed counts from now, so saving one
+		// leaves the other's count alone.
+		newCheck, newUpdate := s.cfg.Schedule.TimesFor(*set)
+		now := s.now().UTC()
+		if newCheck != oldCheck {
+			set.CheckSavedAt = now
+		}
+		if newUpdate != oldUpdate {
+			set.UpdateSavedAt = now
+		}
 		return nil
 	})
 	if err != nil {

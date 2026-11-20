@@ -144,7 +144,9 @@ func (d *Discord) Post(ctx context.Context, e embed) error {
 			return nil
 		case resp.StatusCode == http.StatusTooManyRequests:
 			after := retryAfter(resp.Header, msg)
-			if after > maxRetryWait {
+			// A wait that would outlast the caller's deadline, such as Send
+			// test's, is told at once rather than cut short.
+			if dl, ok := ctx.Deadline(); after > maxRetryWait || ok && time.Until(dl) < after {
 				return fmt.Errorf("Discord rate limited the webhook for %s; not waiting that long", after.Round(time.Second))
 			}
 			last = errors.New("Discord rate limited the webhook")

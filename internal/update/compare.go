@@ -145,6 +145,11 @@ func sameMounts(old, cur []any) error {
 		if !same(m["RW"], got["RW"]) {
 			return fmt.Errorf("mount %s: read-write was %v, now %v", dst, m["RW"], got["RW"])
 		}
+		// A bind's propagation decides whether mounts made inside reach the
+		// host, and the other way round.
+		if !same(m["Propagation"], got["Propagation"]) {
+			return fmt.Errorf("mount %s: propagation was %s, now %s", dst, show(m["Propagation"]), show(got["Propagation"]))
+		}
 	}
 	return nil
 }

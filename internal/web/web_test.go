@@ -49,6 +49,10 @@ type fakeSchedule struct{ check, update server.When }
 
 func (f fakeSchedule) Times() (server.When, server.When) { return f.check, f.update }
 
+func (f fakeSchedule) TimesFor(set store.Settings) (server.When, server.When) {
+	return server.Saved(set, f.check, f.update)
+}
+
 var t0 = time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
 
 // fixture is a state with two agents: a full check of each, then an update
@@ -248,9 +252,21 @@ func TestSettings(t *testing.T) {
 	}
 	if got, _ := st.Read(); !got.Settings.Saved || got.Settings.CheckAt != "02:30" || got.Settings.UpdateAt != "03:00" ||
 		got.Settings.CheckEvery != "sun" || got.Settings.UpdateEvery != "last" || got.Settings.Template != "{{.Host}}" ||
-		!got.Settings.SavedAt.Equal(t0.Add(2*time.Hour)) {
+		!got.Settings.CheckSavedAt.Equal(t0.Add(2*time.Hour)) || !got.Settings.UpdateSavedAt.Equal(t0.Add(2*time.Hour)) {
 		t.Fatalf("settings %+v", got.Settings)
 	}
+	// Saving the check time alone leaves the update's count alone, so an
+	// update time saved just before still runs (R6).
+	s.now = func() time.Time { return t0.Add(3 * time.Hour) }
+	do(t, h, "POST", "/settings", url.Values{"check_at": {"04:00"}, "update_at": {"03:00"},
+		"check_period": {"week"}, "check_weekday": {"sun"}, "update_period": {"month"}, "update_day": {"last day"}})
+	if got, _ := st.Read(); got.Settings.CheckAt != "04:00" || !got.Settings.CheckSavedAt.Equal(t0.Add(3*time.Hour)) ||
+		!got.Settings.UpdateSavedAt.Equal(t0.Add(2*time.Hour)) {
+		t.Fatalf("check saved alone: %+v", got.Settings)
+	}
+	<-wake
+	do(t, h, "POST", "/settings", url.Values{"check_at": {"02:30"}, "update_at": {"03:00"},
+		"check_period": {"week"}, "check_weekday": {"sun"}, "update_period": {"month"}, "update_day": {"last day"}})
 	// The saved period's field shows; the other stays hidden.
 	if _, body := do(t, h, "GET", "/settings", nil); !strings.Contains(body, `<span class="when-field" data-for="week"><span class="muted">on</span>`) ||
 		!strings.Contains(body, `<option value="sun" selected>Sunday</option>`) || !strings.Contains(body, `name="update_day" value="last day"`) {

@@ -101,6 +101,15 @@ func TestCompareFindsDifferences(t *testing.T) {
 			ct["Mounts"] = append(append([]any{}, ms[:3]...), m)
 		}, "mount /anon"},
 		{"a mount missing", func(ct map[string]any) { ct["Mounts"] = list(ct["Mounts"])[1:] }, "mount /conf"},
+		{"a bind's propagation changed", func(ct map[string]any) {
+			ms := list(ct["Mounts"])
+			m := map[string]any{}
+			for k, v := range object(ms[0]) {
+				m[k] = v
+			}
+			m["Propagation"] = "rshared"
+			ct["Mounts"] = append([]any{m}, ms[1:]...)
+		}, "mount /conf: propagation"},
 		{"an exposed port missing", func(ct map[string]any) {
 			delete(ct["Config"].(map[string]any), "ExposedPorts")
 		}, "Config.ExposedPorts is missing"},

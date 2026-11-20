@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dor1a/hikifune/internal/store"
 )
 
 // Clock is a time of day, HH:MM.
@@ -182,32 +184,43 @@ func (s *Schedule) Times() (check, update When) {
 	return check, update
 }
 
-// times also says when the schedule was last saved or reset in the web UI.
-// A saved schedule replaces the environment's whole, so an empty period in
-// it is every day.
-func (s *Schedule) times() (check, update When, saved time.Time) {
-	check, update = When{s.CheckEvery, s.CheckAt}, When{s.UpdateEvery, s.UpdateAt}
-	st, err := s.Runner.Store.Read()
-	if err != nil {
-		return check, update, time.Time{}
+// TimesFor are the schedules that would be in force with set saved.
+func (s *Schedule) TimesFor(set store.Settings) (check, update When) {
+	return Saved(set, When{s.CheckEvery, s.CheckAt}, When{s.UpdateEvery, s.UpdateAt})
+}
+
+// Saved are the schedules in force with set, given the environment's. A
+// saved schedule replaces the environment's whole, so an empty period in it
+// is every day.
+func Saved(set store.Settings, envCheck, envUpdate When) (check, update When) {
+	check, update = envCheck, envUpdate
+	if !set.Saved {
+		return check, update
 	}
-	saved = st.Settings.SavedAt
-	if !st.Settings.Saved {
-		return check, update, saved
-	}
-	if c, err := ParseClock(st.Settings.CheckAt); err == nil {
+	if c, err := ParseClock(set.CheckAt); err == nil {
 		check.At = c
 	}
-	if u, err := ParseClock(st.Settings.UpdateAt); err == nil {
+	if u, err := ParseClock(set.UpdateAt); err == nil {
 		update.At = u
 	}
-	if e, err := ParseEvery(st.Settings.CheckEvery); err == nil {
+	if e, err := ParseEvery(set.CheckEvery); err == nil {
 		check.Every = e
 	}
-	if e, err := ParseEvery(st.Settings.UpdateEvery); err == nil {
+	if e, err := ParseEvery(set.UpdateEvery); err == nil {
 		update.Every = e
 	}
-	return check, update, saved
+	return check, update
+}
+
+// times also says when each schedule was last changed in the web UI.
+func (s *Schedule) times() (check, update When, saved map[string]time.Time) {
+	st, err := s.Runner.Store.Read()
+	if err != nil {
+		check, update = s.TimesFor(store.Settings{})
+		return check, update, nil
+	}
+	check, update = s.TimesFor(st.Settings)
+	return check, update, map[string]time.Time{KindCheck: st.Settings.CheckSavedAt, KindUpdate: st.Settings.UpdateSavedAt}
 }
 
 // Loop runs until ctx ends. Each kind's next run is counted from its last
@@ -228,20 +241,30 @@ func (s *Schedule) Loop(ctx context.Context) {
 	start := now()
 	ref := map[string]time.Time{KindCheck: start, KindUpdate: start}
 	var seen map[string]When
+	var seenSaved map[string]time.Time
 	for {
 		checkWhen, updateWhen, saved := s.times()
+		if saved == nil && seen != nil {
+			// The state could not be read: keep what was in force.
+			checkWhen, updateWhen, saved = seen[KindCheck], seen[KindUpdate], seenSaved
+		}
 		planned := map[string]When{KindCheck: checkWhen, KindUpdate: updateWhen}
 		for kind, c := range planned {
-			if old, ok := seen[kind]; ok && old != c {
-				// Counted from when it was saved, not from when the loop
-				// saw it after a run: a time still ahead then still runs.
-				ref[kind] = now()
-				if !saved.IsZero() && saved.Before(ref[kind]) && saved.After(start) {
-					ref[kind] = saved
-				}
+			old, ok := seen[kind]
+			// A schedule saved since, even back to what the loop last saw
+			// (changed and then reset while a run kept it busy), counts
+			// from its save too.
+			if !ok || old == c && saved[kind].Equal(seenSaved[kind]) {
+				continue
+			}
+			// Counted from when it was saved, not from when the loop saw it
+			// after a run: a time still ahead then still runs.
+			ref[kind] = now()
+			if at := saved[kind]; !at.IsZero() && at.Before(ref[kind]) && at.After(start) {
+				ref[kind] = at
 			}
 		}
-		seen = planned
+		seen, seenSaved = planned, saved
 		check, upd := checkWhen.Next(ref[KindCheck], s.Location), updateWhen.Next(ref[KindUpdate], s.Location)
 		kinds, at := []string{KindCheck}, check
 		switch {
@@ -262,10 +285,20 @@ func (s *Schedule) Loop(ctx context.Context) {
 		for _, kind := range kinds {
 			// A run waits for one going on, and the times may change
 			// meanwhile: it starts only if its time is still the one it was
-			// planned for, and the next turn of the loop plans it anew.
+			// planned for and was not saved since (changed and set back
+			// counts as saved), and the next turn of the loop plans it anew.
 			run, ran, err := s.Runner.RunIf(ctx, kind, func() bool {
-				check, upd := s.Times()
-				return map[string]When{KindCheck: check, KindUpdate: upd}[kind] == planned[kind]
+				check, upd, savedNow := s.times()
+				switch {
+				case savedNow == nil:
+					// The state could not be read now: go by the plan.
+					return true
+				case saved == nil:
+					// Nor when the run was planned: go by the times.
+					return map[string]When{KindCheck: check, KindUpdate: upd}[kind] == planned[kind]
+				}
+				return map[string]When{KindCheck: check, KindUpdate: upd}[kind] == planned[kind] &&
+					savedNow[kind].Equal(saved[kind])
 			})
 			switch {
 			case err != nil:

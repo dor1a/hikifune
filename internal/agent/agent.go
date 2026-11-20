@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -12,12 +13,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dor1a/hikifune/internal/buildinfo"
 	"github.com/dor1a/hikifune/internal/docker"
+	"github.com/dor1a/hikifune/internal/hostlock"
 	"github.com/dor1a/hikifune/internal/inventory"
 	"github.com/dor1a/hikifune/internal/protocol"
 	"github.com/dor1a/hikifune/internal/registry"
@@ -27,8 +30,10 @@ import (
 const (
 	// MinTokenLength keeps a guessable token out.
 	MinTokenLength = 32
-	// keepJobs is how many finished jobs the agent still answers for.
+	// keepJobs is how many finished jobs the agent still answers for, and
+	// keepUsed how many job numbers it refuses to run again.
 	keepJobs = 32
+	keepUsed = 1024
 	maxBody  = 1 << 20
 )
 
@@ -46,16 +51,22 @@ type Config struct {
 	Token string
 	// Watch is used when an update request gives none.
 	Watch time.Duration
+	// LockPath is the lock file each job holds (hostlock.Path), shared
+	// with hikifune-agent update run by hand; empty keeps jobs apart in this
+	// process only, as tests do.
+	LockPath string
 }
 
 // Agent answers the server. Jobs run under the context New was given, so
 // cancelling it rolls a running update back.
 type Agent struct {
-	token string
-	watch time.Duration
-	limit time.Duration // JobLimit, shorter in tests
-	base  context.Context
-	now   func() time.Time
+	token    string
+	watch    time.Duration
+	limit    time.Duration // JobLimit, shorter in tests
+	base     context.Context
+	now      func() time.Time
+	lockPath string
+	boot     string // protocol.Version.Boot
 
 	// What the agent does, replaced in tests.
 	version   func(ctx context.Context) protocol.Version
@@ -69,7 +80,10 @@ type Agent struct {
 	current  *protocol.Job
 	pruning  bool
 	finished []protocol.Job
-	jobs     sync.WaitGroup
+	// used are the job numbers of the last keepUsed jobs, oldest first, so a
+	// number whose job no longer is in finished is not run again.
+	used []string
+	jobs sync.WaitGroup
 }
 
 // New returns an agent for cfg. Jobs run under ctx.
@@ -84,7 +98,7 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		cfg.Watch = update.DefaultWatch
 	}
 	d, reg, auth := cfg.Docker, cfg.Registry, cfg.Auth
-	a := &Agent{token: cfg.Token, watch: cfg.Watch, limit: JobLimit, base: ctx, now: time.Now}
+	a := &Agent{token: cfg.Token, watch: cfg.Watch, limit: JobLimit, base: ctx, now: time.Now, lockPath: cfg.LockPath, boot: newID()}
 	a.version = func(ctx context.Context) protocol.Version {
 		v := protocol.Version{Agent: buildinfo.Version}
 		dv, err := d.CheckAPI(ctx)
@@ -117,7 +131,9 @@ func (a *Agent) Handler() http.Handler {
 	})
 	api := http.NewServeMux()
 	api.HandleFunc("GET "+protocol.PathVersion, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, a.version(r.Context()))
+		v := a.version(r.Context())
+		v.Boot = a.boot
+		writeJSON(w, http.StatusOK, v)
 	})
 	api.HandleFunc("GET "+protocol.PathInventory, func(w http.ResponseWriter, r *http.Request) {
 		rep, err := a.inventory(r.Context())
@@ -158,8 +174,9 @@ func (a *Agent) startUpdate(w http.ResponseWriter, r *http.Request) {
 	var req protocol.UpdateRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.Container) == "" || req.WatchSeconds < 0 {
-		writeError(w, http.StatusBadRequest, errors.New(`the body must be {"container": "<name>", "watch_seconds": <n>}`))
+	if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.Container) == "" || req.WatchSeconds < 0 ||
+		req.Job != "" && !protocol.ValidJob(req.Job) {
+		writeError(w, http.StatusBadRequest, errors.New(`the body must be {"container": "<name>", "watch_seconds": <n>, "job": "<16 to 64 hex digits>"}`))
 		return
 	}
 	watch := a.watch
@@ -167,6 +184,22 @@ func (a *Agent) startUpdate(w http.ResponseWriter, r *http.Request) {
 		watch = time.Duration(req.WatchSeconds) * time.Second
 	}
 	a.mu.Lock()
+	// The same job asked for again, after its answer was lost: answer with
+	// it rather than start another.
+	if j, ok := a.jobLocked(req.Job); ok {
+		a.mu.Unlock()
+		if j.Container != req.Container {
+			writeError(w, http.StatusConflict, fmt.Errorf("job %s is an update of %s", req.Job, j.Container))
+			return
+		}
+		writeJSON(w, http.StatusAccepted, j)
+		return
+	}
+	if req.Job != "" && slices.Contains(a.used, req.Job) {
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, fmt.Errorf("job %s already ran on this agent, and its result is no longer kept", req.Job))
+		return
+	}
 	if a.current != nil {
 		busy := *a.current
 		a.mu.Unlock()
@@ -178,8 +211,18 @@ func (a *Agent) startUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("a prune is running on this host"))
 		return
 	}
-	job := &protocol.Job{ID: newID(), Container: req.Container, State: protocol.JobRunning, Started: a.now().UTC()}
+	lock, err := a.lockHost()
+	if err != nil {
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	job := &protocol.Job{ID: cmp.Or(req.Job, newID()), Container: req.Container, State: protocol.JobRunning, Started: a.now().UTC()}
 	a.current = job
+	a.used = append(a.used, job.ID)
+	if len(a.used) > keepUsed {
+		a.used = a.used[len(a.used)-keepUsed:]
+	}
 	accepted := *job
 	a.jobs.Add(1)
 	a.mu.Unlock()
@@ -187,6 +230,9 @@ func (a *Agent) startUpdate(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer a.jobs.Done()
 		res := a.run(job.Container, req.ID, watch)
+		// Before the job shows as done: the prune the server sends once it
+		// sees that must find the host free.
+		lock.Release()
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		done := a.now().UTC()
@@ -229,18 +275,30 @@ func (a *Agent) run(container, id string, watch time.Duration) update.Result {
 func (a *Agent) getJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.current != nil && a.current.ID == id {
-		writeJSON(w, http.StatusOK, *a.current)
+	j, ok := a.jobLocked(id)
+	a.mu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no job %s on this agent", id))
 		return
+	}
+	writeJSON(w, http.StatusOK, j)
+}
+
+// jobLocked finds the job numbered id, running or finished; the caller
+// holds a.mu.
+func (a *Agent) jobLocked(id string) (protocol.Job, bool) {
+	if id == "" {
+		return protocol.Job{}, false
+	}
+	if a.current != nil && a.current.ID == id {
+		return *a.current, true
 	}
 	for _, j := range a.finished {
 		if j.ID == id {
-			writeJSON(w, http.StatusOK, j)
-			return
+			return j, true
 		}
 	}
-	writeError(w, http.StatusNotFound, fmt.Errorf("no job %s on this agent", id))
+	return protocol.Job{}, false
 }
 
 func (a *Agent) runPrune(w http.ResponseWriter, r *http.Request) {
@@ -256,12 +314,19 @@ func (a *Agent) runPrune(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("a prune is running on this host"))
 		return
 	}
+	lock, err := a.lockHost()
+	if err != nil {
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	a.pruning = true
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
 		a.pruning = false
 		a.mu.Unlock()
+		lock.Release()
 	}()
 	n, err := a.prune(r.Context())
 	if err != nil {
@@ -269,6 +334,26 @@ func (a *Agent) runPrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, protocol.Pruned{Reclaimed: n})
+}
+
+// errByHand is the answer while hikifune-agent update holds the host.
+var errByHand = errors.New("hikifune-agent update is running on this host by hand")
+
+// lockHost takes the host lock for a job, or returns errByHand when an
+// update by hand holds it. A lock file that cannot be opened, as on a
+// read-only file system, leaves jobs apart in this process only.
+func (a *Agent) lockHost() (*hostlock.Lock, error) {
+	if a.lockPath == "" {
+		return nil, nil
+	}
+	lock, err := hostlock.Try(a.lockPath)
+	switch {
+	case errors.Is(err, hostlock.ErrBusy):
+		return nil, errByHand
+	case err != nil:
+		slog.Warn("cannot take the host lock; an update by hand could run at the same time", "path", a.lockPath, "err", hostlock.Hint(a.lockPath, err))
+	}
+	return lock, nil
 }
 
 func newID() string {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -95,9 +96,19 @@ type fakeHost struct {
 	requests []protocol.UpdateRequest
 	onCheck  func()
 	onStart  func(container string)
+	// lostAnswers and lostRequests are update requests whose answer, or
+	// which themselves, are lost on the way; gatewayAnswers are taken and
+	// then answered with a 502 by something between.
+	lostAnswers    int
+	lostRequests   int
+	gatewayAnswers int
 }
 
-func (h *fakeHost) Version(context.Context) (protocol.Version, error) { return h.version, h.versErr }
+func (h *fakeHost) Version(context.Context) (protocol.Version, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.version, h.versErr
+}
 func (h *fakeHost) Check(context.Context) (protocol.CheckReport, error) {
 	if h.onCheck != nil {
 		h.onCheck()
@@ -112,6 +123,13 @@ func (h *fakeHost) StartUpdate(_ context.Context, req protocol.UpdateRequest) (p
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.lostRequests > 0 {
+		h.lostRequests--
+		return protocol.Job{}, errors.New("POST /api/v1/updates: connection reset by peer")
+	}
+	if j, ok := h.jobs[req.Job]; ok && req.Job != "" {
+		return j, nil
+	}
 	if h.busyOnce {
 		h.busyOnce = false
 		busy := protocol.Job{ID: "other", Container: "manual", State: protocol.JobDone,
@@ -126,9 +144,17 @@ func (h *fakeHost) StartUpdate(_ context.Context, req protocol.UpdateRequest) (p
 		res = update.Result{Container: req.Container, Outcome: update.Updated}
 	}
 	now := time.Now()
-	j := protocol.Job{ID: fmt.Sprint(len(h.started)), Container: req.Container, State: protocol.JobDone,
+	j := protocol.Job{ID: cmp.Or(req.Job, fmt.Sprint(len(h.started))), Container: req.Container, State: protocol.JobDone,
 		Started: now, Finished: &now, Result: &res}
 	h.jobs[j.ID] = j
+	if h.lostAnswers > 0 {
+		h.lostAnswers--
+		return protocol.Job{}, errors.New("POST /api/v1/updates: decode the answer: unexpected EOF")
+	}
+	if h.gatewayAnswers > 0 {
+		h.gatewayAnswers--
+		return protocol.Job{}, &StatusError{Status: http.StatusBadGateway}
+	}
 	return protocol.Job{ID: j.ID, State: protocol.JobRunning, Started: now}, nil
 }
 func (h *fakeHost) Job(_ context.Context, id string) (protocol.Job, error) {
@@ -139,10 +165,11 @@ func (h *fakeHost) Job(_ context.Context, id string) (protocol.Job, error) {
 		h.jobErrs--
 		return protocol.Job{}, errors.New("unexpected EOF")
 	}
-	if h.lostJobs {
+	j, ok := h.jobs[id]
+	if h.lostJobs || !ok {
 		return protocol.Job{}, &StatusError{Status: http.StatusNotFound}
 	}
-	return h.jobs[id], nil
+	return j, nil
 }
 func (h *fakeHost) Prune(context.Context) (protocol.Pruned, error) {
 	h.pruned++
@@ -654,6 +681,158 @@ func TestARunChangesNoFailureOfAHostAddedSince(t *testing.T) {
 	}
 }
 
+// The answer to an update request is lost after the agent took the job:
+// the server asks for the job by its own number until the agent answers,
+// records the result and prunes. A request lost on its way is sent again,
+// and started once.
+func TestALostAnswerLosesNoJob(t *testing.T) {
+	for _, tt := range []struct {
+		name                                string
+		requests, answers, lookups, gateway int
+	}{
+		{"the answer", 0, 1, 0, 0},
+		{"the request", 1, 0, 0, 0},
+		{"the request, then the answer to the second", 1, 1, 0, 0},
+		{"the answer and the first ask for the job", 0, 1, 1, 0},
+		{"the answer, a 502 from something between", 0, 0, 0, 1},
+	} {
+		a := newHost()
+		a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+		a.lostRequests, a.lostAnswers, a.jobErrs, a.gatewayAnswers = tt.requests, tt.answers, tt.lookups, tt.gateway
+		r := newRunner(t, map[string]*fakeHost{"a": a})
+		run, err := r.Run(context.Background(), KindUpdate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := entry(t, run.Hosts[0], "web")
+		if e.Status != string(update.Updated) || len(a.started) != 1 || a.pruned != 1 || !protocol.ValidJob(a.requests[0].Job) {
+			t.Errorf("lost %s: entry %+v, started %v, pruned %d, requests %+v", tt.name, e, a.started, a.pruned, a.requests)
+		}
+	}
+}
+
+// An agent that restarted after a request was lost is not sent it again:
+// the agent that may have taken it is gone (R32).
+func TestARestartedAgentIsNotSentALostRequestAgain(t *testing.T) {
+	a := newHost()
+	a.version.Boot = "first"
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	a.lostRequests = 1
+	a.onStart = func(string) {
+		a.mu.Lock()
+		a.version.Boot = "second"
+		a.mu.Unlock()
+	}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	run, err := r.Run(context.Background(), KindUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := entry(t, run.Hosts[0], "web"); e.Status != string(update.Failed) || !strings.Contains(e.Reason, "restarted") || len(a.started) != 0 {
+		t.Fatalf("entry %+v, started %v", e, a.started)
+	}
+}
+
+// The check-only switch turned on before a lost request is sent again keeps
+// it from going, as before the first send (R35).
+func TestCheckOnlyStopsASendAgain(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	a.lostRequests = 1
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	a.onStart = func(string) {
+		r.Store.Update(func(s *store.State) error {
+			s.Agents[0].CheckOnly = true
+			return nil
+		})
+	}
+	run, err := r.Run(context.Background(), KindUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := entry(t, run.Hosts[0], "web"); e.Status != "skipped" || len(a.started) != 0 {
+		t.Fatalf("entry %+v, started %v", e, a.started)
+	}
+}
+
+// A host removed and added again under its name right after the run read
+// the agents, with an added time before the run's start, is another host
+// all the same: the run's failures do not reach it.
+func TestARunChangesNoFailureOfAHostAddedAgain(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	a.outcomes["web"] = update.Result{Container: "web", Outcome: update.RolledBack, Reason: "exited", Digest: "sha256:w"}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	a.onCheck = func() {
+		r.Store.Update(func(s *store.State) error {
+			s.Agents[0] = store.Agent{Name: "a", URL: "http://other:7778", Token: "t2", Added: time.Now().Add(-time.Hour)}
+			return nil
+		})
+	}
+	if _, err := r.Run(context.Background(), KindUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.Store.Read(); len(st.Failed) != 0 {
+		t.Fatalf("failures %+v", st.Failed)
+	}
+}
+
+// agent remove that wrote agents.json but failed on state.json leaves the
+// old host's failures behind. A host added later under the name does not
+// skip on them, and the next run drops them, with those of hosts gone.
+func TestFailuresFromBeforeAHostWasAddedAreNotItsOwn(t *testing.T) {
+	added := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name string
+		id   string
+		old  store.Failure
+	}{
+		// The clock went back between the old failure and the new agent:
+		// the IDs still tell them apart.
+		{"by ID", "new", store.Failure{Agent: "a", AgentID: "old", Container: "web", Digest: "sha256:w", At: added.Add(time.Minute)}},
+		// An agent added before agents had IDs goes by the added time.
+		{"by the added time", "", store.Failure{Agent: "a", Container: "web", Digest: "sha256:w", At: added.Add(-time.Hour)}},
+	} {
+		a := newHost()
+		a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+		a.outcomes["web"] = update.Result{Container: "web", Outcome: update.Updated, Digest: "sha256:w"}
+		r := newRunner(t, map[string]*fakeHost{"a": a})
+		r.Store.Update(func(s *store.State) error {
+			s.Agents[0].ID, s.Agents[0].Added = tt.id, added
+			s.Failed = []store.Failure{tt.old, {Agent: "gone", Container: "web", Digest: "sha256:w", At: added}}
+			return nil
+		})
+		run, err := r.Run(context.Background(), KindUpdate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e := entry(t, run.Hosts[0], "web"); e.Status != string(update.Updated) || len(a.started) != 1 {
+			t.Fatalf("%s: entry %+v, started %v", tt.name, e, a.started)
+		}
+		if st, _ := r.Store.Read(); len(st.Failed) != 0 {
+			t.Fatalf("%s: failures %+v", tt.name, st.Failed)
+		}
+	}
+}
+
+// A failure is recorded with the ID of the agent it happened on.
+func TestAFailureCarriesTheAgentsID(t *testing.T) {
+	a := newHost()
+	a.report.Containers = []protocol.Checked{checked("web", registry.UpdateAvailable, "sha256:w")}
+	a.outcomes["web"] = update.Result{Container: "web", Outcome: update.RolledBack, Reason: "exited", Digest: "sha256:w"}
+	r := newRunner(t, map[string]*fakeHost{"a": a})
+	r.Store.Update(func(s *store.State) error {
+		s.Agents[0].ID = "this"
+		return nil
+	})
+	if _, err := r.Run(context.Background(), KindUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.Store.Read(); len(st.Failed) != 1 || st.Failed[0].AgentID != "this" {
+		t.Fatalf("failures %+v", st.Failed)
+	}
+}
+
 // Changing one time while a run goes keeps the other kind's count: the
 // update due during a long check still starts after it.
 func TestScheduleKeepsAnOverdueRunWhenTheOtherTimeChanges(t *testing.T) {
@@ -916,7 +1095,7 @@ func TestNotify(t *testing.T) {
 
 // A schedule saved during a run counts from when it was saved: an update
 // time still ahead then runs, though the loop saw the change only after a
-// slow notification.
+// slow notification, and though the check time was saved again after it.
 func TestScheduleCountsAChangeFromWhenItWasSaved(t *testing.T) {
 	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
 	r.Store.Update(func(st *store.State) error {
@@ -936,7 +1115,12 @@ func TestScheduleCountsAChangeFromWhenItWasSaved(t *testing.T) {
 		once.Do(func() {
 			r.Store.Update(func(st *store.State) error {
 				st.Settings.UpdateAt = "01:01"
-				st.Settings.SavedAt = time.Date(2026, 11, 19, 1, 0, 5, 0, time.UTC)
+				st.Settings.UpdateSavedAt = time.Date(2026, 11, 19, 1, 0, 5, 0, time.UTC)
+				return nil
+			})
+			r.Store.Update(func(st *store.State) error {
+				st.Settings.CheckAt = "05:00"
+				st.Settings.CheckSavedAt = time.Date(2026, 11, 19, 1, 1, 15, 0, time.UTC)
 				return nil
 			})
 			s.Wake <- struct{}{}
@@ -971,6 +1155,96 @@ func TestScheduleCountsAChangeFromWhenItWasSaved(t *testing.T) {
 	}
 	if strings.Join(kinds, " ") != "check update" {
 		t.Fatalf("runs %v", kinds)
+	}
+}
+
+// The update time changed and then reset while a check's notification kept
+// the loop busy is back to what the loop last saw, yet it was saved: it
+// counts from the reset, so the update time it passed waits for its next
+// week (R36).
+func TestAScheduleResetDuringARunCountsFromTheReset(t *testing.T) {
+	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
+	ck, _ := ParseClock("01:00")
+	up, _ := ParseClock("01:01")
+	now := time.Date(2026, 11, 19, 0, 59, 0, 0, time.UTC)
+	s := &Schedule{Runner: r, Location: time.UTC, CheckAt: ck, UpdateAt: up, UpdateEvery: Every{Weekly: true, Weekday: time.Thursday}}
+	s.now = func() time.Time { return now }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.sleep = func(_ context.Context, d time.Duration) error {
+		if d <= 0 {
+			return nil
+		}
+		if now.Minute() == 59 {
+			now = now.Add(d)
+			return nil
+		}
+		cancel()
+		return context.Canceled
+	}
+	r.Notify = func(_ context.Context, run store.Run) {
+		if run.Kind != KindCheck {
+			return
+		}
+		now = now.Add(5 * time.Second)
+		r.Store.Update(func(st *store.State) error {
+			st.Settings = store.Settings{Saved: true, CheckAt: "01:00", UpdateAt: "02:00", UpdateEvery: "thu", UpdateSavedAt: now}
+			return nil
+		})
+		now = now.Add(70 * time.Second)
+		r.Store.Update(func(st *store.State) error {
+			st.Settings = store.Settings{UpdateSavedAt: now}
+			return nil
+		})
+	}
+	s.Loop(ctx)
+	st, _ := r.Store.Read()
+	if len(st.Runs) != 1 || st.Runs[0].Kind != KindCheck {
+		t.Fatalf("%d runs, the last %s", len(st.Runs), st.Runs[len(st.Runs)-1].Kind)
+	}
+}
+
+// The same with the check and the update on the same minute: the update
+// planned with the check sees the reset before it starts, and waits for
+// its next week too.
+func TestAScheduleResetBeforeAPlannedRunStopsIt(t *testing.T) {
+	r := newRunner(t, map[string]*fakeHost{"a": newHost()})
+	at, _ := ParseClock("01:00")
+	now := time.Date(2026, 11, 19, 0, 59, 0, 0, time.UTC)
+	s := &Schedule{Runner: r, Location: time.UTC, CheckAt: at, UpdateAt: at, UpdateEvery: Every{Weekly: true, Weekday: time.Thursday}}
+	s.now = func() time.Time { return now }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.sleep = func(_ context.Context, d time.Duration) error {
+		if d <= 0 {
+			return nil
+		}
+		if now.Minute() == 59 {
+			now = now.Add(d)
+			return nil
+		}
+		cancel()
+		return context.Canceled
+	}
+	r.Notify = func(_ context.Context, run store.Run) {
+		if run.Kind != KindCheck {
+			return
+		}
+		now = now.Add(5 * time.Second)
+		r.Store.Update(func(st *store.State) error {
+			st.Settings = store.Settings{Saved: true, CheckAt: "01:00", UpdateAt: "02:00", UpdateEvery: "thu", UpdateSavedAt: now}
+			return nil
+		})
+		now = now.Add(70 * time.Second)
+		r.Store.Update(func(st *store.State) error {
+			st.Settings = store.Settings{UpdateSavedAt: now}
+			return nil
+		})
+	}
+	s.Loop(ctx)
+	st, _ := r.Store.Read()
+	if len(st.Runs) != 1 || st.Runs[0].Kind != KindCheck {
+		t.Fatalf("%d runs, the last %s", len(st.Runs), st.Runs[len(st.Runs)-1].Kind)
 	}
 }
 
