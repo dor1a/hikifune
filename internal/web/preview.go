@@ -2,9 +2,9 @@ package web
 
 import (
 	"html"
-	"regexp"
 	"html/template"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"

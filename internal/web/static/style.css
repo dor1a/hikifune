@@ -117,9 +117,9 @@ body {
 .dot.bad { background: var(--error); }
 .dot.never { background: var(--line); }
 .count { min-width: 22px; padding: 0 7px; border-radius: 999px; background: var(--accent-weak); color: var(--accent); font-size: 12px; font-weight: 700; text-align: center; }
-.side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 0 8px; }
+.side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding: 0 8px; }
 .account { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.who { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: 14px; }
+.who { display: inline-flex; align-items: center; gap: 10px; min-width: 0; color: var(--muted); font-size: 14px; }
 .who .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .face { position: relative; flex: none; width: 28px; height: 28px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--accent-weak); color: var(--accent); font-size: 13px; font-weight: 800; }
 .face img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -168,6 +168,15 @@ input[type="text"], input[type="search"], input[type="time"], select {
   color: var(--text);
   font: inherit;
   padding: 6px 10px;
+}
+/* The browser's own arrow sits on the rounded edge, so the select draws one. */
+select {
+  appearance: none;
+  padding: 6px 30px 6px 10px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
 }
 input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
 button { font: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 8px 16px; font-weight: 600; }
@@ -310,7 +319,7 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; bo
    its preview sit side by side, the preview as wide as a Discord embed. */
 .template-grid { display: grid; gap: 0 24px; }
 @media (min-width: 1400px) {
-  .template-grid { grid-template-columns: minmax(0, 1fr) 520px; align-items: stretch; }
+  .template-grid { grid-template-columns: minmax(0, 1fr) 600px; align-items: stretch; }
   .template-grid .preview-head { margin-top: 0; }
   /* The editor grows to the preview's height. */
   .template-edit { display: flex; flex-direction: column; }
@@ -323,7 +332,7 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; bo
 /* The preview copies Discord's dark theme whatever this page's theme is,
    and the bar takes the embed's color by its tone. */
 .embed {
-  max-width: 520px;
+  max-width: 600px;
   margin-bottom: 8px;
   border-left: 4px solid #5b6283;
   border-radius: 4px;
