@@ -269,7 +269,7 @@ Done when: a week of scheduled runs with no failure left unexplained.
 | 6 | What else `protected` turns off | Decided: it is still checked and shown (R4), and Update now works on it after a confirmation (R34) |
 | 7 | Credential helpers | Whether `credsStore` and `credHelpers` in `config.json` are supported, or only `auths`. M2 reads `auths` only; when a registry refuses an image whose credentials sit in a helper, the reason names the helper |
 | 8 | Image platforms | amd64 and arm64 |
-| 9 | Logo | Draft A (tow) is preferred, not final. The social preview drafts still say "opted in with compose labels", which no longer matches R4. Drafts are in [docs/logo](logo/) |
+| 9 | Logo | Decided: A (tow), in [docs/logo](logo/). The favicon is the same mark, in `internal/web/static`. The other drafts are gone, and a social preview is still to be made |
 | 10 | Recreate containers, or commit to Git and let the agent apply it | Decided: recreate. The other way is under [Not doing](#not-doing) |
 
 ### Repository layout
