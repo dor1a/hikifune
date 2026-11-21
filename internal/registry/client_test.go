@@ -26,12 +26,15 @@ type fakeRegistry struct {
 	manifests map[string]fakeManifest
 	old       map[string]bool   // repository@digest of manifests no tag points at
 	redirect  map[string]string // repository -> where an authorized HEAD is redirected
+	bodies    map[string]string // repository:tag or repository@digest -> the body a GET answers with
 	realm     string            // bearer realm, the fake's own /token when empty
 	tokenCode int               // status the token server answers with, 200 when 0
 	tokenBody string
 
 	mu         sync.Mutex
 	heads      int
+	gets       int
+	hangGet    bool // a GET waits until the client gives up
 	tokenCalls int
 }
 
@@ -45,7 +48,7 @@ func newFakeRegistry(t *testing.T, auth string) *fakeRegistry {
 	t.Helper()
 	f := &fakeRegistry{auth: auth, user: "alice", pass: "s3cret",
 		private: map[string]bool{}, broken: map[string]int{}, noDigest: map[string]bool{},
-		manifests: map[string]fakeManifest{}, old: map[string]bool{}, redirect: map[string]string{}}
+		manifests: map[string]fakeManifest{}, old: map[string]bool{}, redirect: map[string]string{}, bodies: map[string]string{}}
 	f.srv = httptest.NewTLSServer(f)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -83,11 +86,16 @@ func (f *fakeRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, tag := rest[:i], rest[i+len("/manifests/"):]
-	if r.Method != http.MethodHead {
-		http.Error(w, "HEAD only", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodHead && r.Method != http.MethodGet {
+		http.Error(w, "HEAD and GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	f.heads++
+	if r.Method == http.MethodHead {
+		f.heads++
+	} else if f.gets++; f.hangGet {
+		<-r.Context().Done()
+		return
+	}
 	if !f.authorized(w, r, repo) {
 		return
 	}
@@ -110,6 +118,9 @@ func (f *fakeRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Docker-Content-Digest", tag)
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, f.bodies[repo+"@"+tag])
+		}
 		return
 	}
 	m, ok := f.manifests[repo+":"+tag]
@@ -125,6 +136,9 @@ func (f *fakeRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Docker-Content-Digest", digest)
 	}
 	w.Header().Set("Content-Type", m.mediaType)
+	if r.Method == http.MethodGet {
+		fmt.Fprint(w, f.bodies[repo+":"+tag])
+	}
 }
 
 func (f *fakeRegistry) authorized(w http.ResponseWriter, r *http.Request, repo string) bool {

@@ -46,7 +46,12 @@ type Container struct {
 	Image          string   `json:"image"`
 	ImageID        string   `json:"image_id"`
 	RepoDigests    []string `json:"repo_digests"`
-	ImageError     string   `json:"image_error,omitempty"`
+	// OS, Architecture and Variant are the platform of the image the
+	// container runs, as image inspect gives them.
+	OS           string `json:"os,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	Variant      string `json:"variant,omitempty"`
+	ImageError   string `json:"image_error,omitempty"`
 	// TagMoved means Image now names another image on this host than the one
 	// the container runs: a later pull or build moved the tag, and the
 	// container was not recreated. With the containerd image store the old
@@ -154,8 +159,11 @@ func describe(ctx context.Context, c *docker.Client, images *imageCache, id stri
 		item.ImageError = "image " + ct.Image + " not found"
 	case err != nil:
 		return Container{}, false, err
-	case img.RepoDigests != nil:
-		item.RepoDigests = img.RepoDigests
+	default:
+		if img.RepoDigests != nil {
+			item.RepoDigests = img.RepoDigests
+		}
+		item.OS, item.Architecture, item.Variant = img.Os, img.Architecture, img.Variant
 	}
 	// Asked even when the container's image is gone: with the containerd
 	// store, rebuilding a local image under the same name drops the old

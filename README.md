@@ -136,6 +136,8 @@ The proxy itself carries `hikifune.protected=true`: recreating it would cut the 
 
 The value of `hikifune.protected` is read as a boolean (`true`, `false`, `1`, `0` and the like). The label with no value counts as `true`. Any other value also counts as protected, so a typo never leads to an update, and the check reports the label to fix.
 
+A tag sometimes moves to a new multi-platform index while the image for the host's platform stays the same, as when the publisher adds a platform. That is not an update: the check reads the index and compares the image the container runs.
+
 An image counts as hikifune's own when the last part of its repository is `hikifune` or `hikifune-agent`, wherever it is hosted, so a mirror of hikifune's images is never recreated either.
 
 An update that fails or is rolled back is not tried again on schedule for the same digest. A newer digest is, and **Update now** tries the same digest again; when it succeeds, the failure is forgotten.

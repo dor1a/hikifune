@@ -24,7 +24,8 @@ func Check(ctx context.Context, d *docker.Client, r *registry.Client) (protocol.
 	targets := make([]registry.Target, len(rep.Containers))
 	for i, ct := range rep.Containers {
 		targets[i] = registry.Target{Image: ct.Image, RepoDigests: ct.RepoDigests, TagMoved: ct.TagMoved,
-			ImageID: ct.ImageID, NamedRepoDigests: ct.NamedRepoDigests}
+			ImageID: ct.ImageID, NamedRepoDigests: ct.NamedRepoDigests,
+			Platform: registry.Platform{OS: ct.OS, Architecture: ct.Architecture, Variant: ct.Variant}}
 	}
 	results := r.CheckAll(ctx, targets)
 	out := protocol.CheckReport{Docker: rep.Docker, Containers: make([]protocol.Checked, len(rep.Containers))}

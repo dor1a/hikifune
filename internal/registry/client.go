@@ -2,7 +2,10 @@ package registry
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,17 +175,23 @@ func (c *Client) Has(ctx context.Context, ref Reference, digest string) (bool, e
 	return false, c.statusError(ref, resp.StatusCode)
 }
 
-// manifest sends a HEAD for one tag or digest in ref's repository. A 401 is
-// answered once with the credentials the registry's WWW-Authenticate asks
-// for: basic auth, or a bearer token from its token server.
+// manifest sends a HEAD for one tag or digest in ref's repository.
 func (c *Client) manifest(ctx context.Context, ref Reference, reference string) (*http.Response, error) {
+	return c.fetch(ctx, http.MethodHead, ref, reference)
+}
+
+// fetch sends a HEAD or a GET for one tag or digest in ref's repository. A
+// 401 is answered once with the credentials the registry's WWW-Authenticate
+// asks for: basic auth, or a bearer token from its token server. The body of
+// a GET is left open for the caller.
+func (c *Client) fetch(ctx context.Context, method string, ref Reference, reference string) (*http.Response, error) {
 	scheme := "https"
 	if c.plain[ref.Registry] {
 		scheme = "http"
 	}
 	target := scheme + "://" + apiHost(ref.Registry) + "/v2/" + ref.Repository + "/manifests/" + url.PathEscape(reference)
 	key := ref.Name()
-	resp, err := c.head(ctx, target, c.cached(key))
+	resp, err := c.send(ctx, method, target, c.cached(key))
 	if err != nil {
 		return nil, err
 	}
@@ -202,11 +211,12 @@ func (c *Client) manifest(ctx context.Context, ref Reference, reference string) 
 	if err != nil {
 		return nil, err
 	}
-	if resp, err = c.head(ctx, target, auth.header); err != nil {
+	if resp, err = c.send(ctx, method, target, auth.header); err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
-		// The credentials were taken, even if the manifest is missing.
+	if method == http.MethodHead && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		// The credentials were taken, even if the manifest is missing. A GET
+		// is an extra look and leaves what later checks send as it was.
 		c.store(key, auth)
 	}
 	return resp, nil
@@ -220,8 +230,10 @@ func (c *Client) statusError(ref Reference, status int) error {
 	return e
 }
 
-func (c *Client) head(ctx context.Context, target, auth string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
+// send makes one request. The body is closed unless it is a GET that did not
+// need credentials, which the caller reads.
+func (c *Client) send(ctx context.Context, method, target, auth string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -233,8 +245,114 @@ func (c *Client) head(ctx context.Context, target, auth string) (*http.Response,
 	if err != nil {
 		return nil, cleanErr(err)
 	}
-	resp.Body.Close()
+	if method != http.MethodGet || resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+	}
 	return resp, nil
+}
+
+// maxManifest is the largest manifest that is read.
+const maxManifest = 4 << 20
+
+// manifestDoc is the part of an index or a manifest that PlatformConfig reads.
+type manifestDoc struct {
+	MediaType string `json:"mediaType"`
+	Manifests []struct {
+		Digest   string `json:"digest"`
+		Platform struct {
+			OS           string `json:"os"`
+			Architecture string `json:"architecture"`
+			Variant      string `json:"variant"`
+		} `json:"platform"`
+	} `json:"manifests"`
+	Config struct {
+		Digest string `json:"digest"`
+	} `json:"config"`
+}
+
+// isIndex tells an index from an image manifest: by its media type, or by a
+// manifests list, even an empty one.
+func (m manifestDoc) isIndex() bool {
+	return m.Manifests != nil || m.MediaType == manifestTypes[0] || m.MediaType == manifestTypes[1]
+}
+
+// PlatformConfig returns the config digest of the image that the manifest
+// digest holds for platform p: through the index's entry for p when digest
+// names an index, which index reports, or from the manifest itself.
+func (c *Client) PlatformConfig(ctx context.Context, ref Reference, digest string, p Platform) (config string, index bool, err error) {
+	m, err := c.getManifest(ctx, ref, digest)
+	if err != nil {
+		return "", false, err
+	}
+	if index = m.isIndex(); index {
+		// An entry that names the variant wins over one that leaves it out.
+		// Attestations are entries for unknown/unknown.
+		child, exact := "", false
+		for _, e := range m.Manifests {
+			ep := Platform{OS: e.Platform.OS, Architecture: e.Platform.Architecture, Variant: e.Platform.Variant}
+			if ep.OS == "unknown" || !p.matches(ep) {
+				continue
+			}
+			if same := ep.Variant == p.Variant; child == "" || (same && !exact) {
+				child, exact = e.Digest, same
+			}
+		}
+		if !validDigest(child) {
+			return "", true, fmt.Errorf("registry %s: the index has no image for %s", ref.Name(), p)
+		}
+		if m, err = c.getManifest(ctx, ref, child); err != nil {
+			return "", true, err
+		}
+		if m.isIndex() {
+			return "", true, fmt.Errorf("registry %s: the index entry for %s is another index", ref.Name(), p)
+		}
+	}
+	if !validDigest(m.Config.Digest) {
+		return "", index, fmt.Errorf("registry %s: the manifest has no config digest", ref.Name())
+	}
+	return m.Config.Digest, index, nil
+}
+
+// getManifest reads the manifest with this digest. The body must be whole,
+// within maxManifest, and hash to the digest.
+func (c *Client) getManifest(ctx context.Context, ref Reference, digest string) (manifestDoc, error) {
+	resp, err := c.fetch(ctx, http.MethodGet, ref, digest)
+	if err != nil {
+		return manifestDoc{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return manifestDoc{}, c.statusError(ref, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifest+1))
+	switch {
+	case err != nil:
+		return manifestDoc{}, fmt.Errorf("registry %s: read the manifest: %w", ref.Name(), err)
+	case len(body) > maxManifest:
+		return manifestDoc{}, fmt.Errorf("registry %s: the manifest is larger than %d bytes", ref.Name(), maxManifest)
+	case !hashesTo(body, digest):
+		return manifestDoc{}, fmt.Errorf("registry %s: the manifest does not hash to %s", ref.Name(), digest)
+	}
+	var m manifestDoc
+	if err := json.Unmarshal(body, &m); err != nil {
+		return manifestDoc{}, fmt.Errorf("registry %s: read the manifest: %w", ref.Name(), err)
+	}
+	return m, nil
+}
+
+// hashesTo tells whether b hashes to digest. A digest of an algorithm other
+// than sha256 and sha512 cannot be checked, so it is false.
+func hashesTo(b []byte, digest string) bool {
+	algo, enc, _ := strings.Cut(digest, ":")
+	switch algo {
+	case "sha256":
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:]) == enc
+	case "sha512":
+		sum := sha512.Sum512(b)
+		return hex.EncodeToString(sum[:]) == enc
+	}
+	return false
 }
 
 func (c *Client) cached(key string) string {

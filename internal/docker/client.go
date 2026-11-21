@@ -434,10 +434,14 @@ func (c *Client) ContainerInspect(ctx context.Context, id string) (Container, er
 // Image is the part of an image's inspect document that hikifune reads,
 // plus the whole document.
 type Image struct {
-	ID          string          `json:"Id"`
-	RepoTags    []string        `json:"RepoTags"`
-	RepoDigests []string        `json:"RepoDigests"`
-	Raw         json.RawMessage `json:"-"`
+	ID          string   `json:"Id"`
+	RepoTags    []string `json:"RepoTags"`
+	RepoDigests []string `json:"RepoDigests"`
+	// Os, Architecture and Variant are the image's platform.
+	Os           string          `json:"Os"`
+	Architecture string          `json:"Architecture"`
+	Variant      string          `json:"Variant"`
+	Raw          json.RawMessage `json:"-"`
 }
 
 // ImageInspect returns one image by ID or reference.
