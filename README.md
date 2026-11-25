@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/logo/A-tow.svg" alt="" width="96">
+<img src="docs/logo/A-tow.svg" alt="" width="200">
 
 # hikifune
 
