@@ -2,7 +2,7 @@ name: hikifune-agent
 
 services:
   hikifune-agent:
-    image: ghcr.io/dor1a/hikifune-agent:0.1.5
+    image: ghcr.io/dor1a/hikifune-agent:0.1.6
     restart: unless-stopped
     env_file:
       - .env
