@@ -153,9 +153,13 @@
 {{range .Groups}}
 <section class="group">
   <div class="group-head">
+    <span class="dot{{if .Issue}} bad{{else if .AsOf.IsZero}} never{{else if .Agent.CheckOnly}} checkonly{{end}}"></span>
     <h2><a href="/hosts/{{seg .Agent.Name}}">{{.Agent.Name}}</a></h2>
     {{if .Agent.CheckOnly}}<span class="tag warn">Check only</span>{{end}}
-    <span class="muted small">{{with .Docker}}Docker {{.}} · {{end}}{{if .AsOf.IsZero}}no container list yet{{else}}{{len .Rows}} containers, {{.Available}} with an update · checked {{ago .AsOf}}{{end}}</span>
+    {{if .AsOf.IsZero}}<span class="muted small">{{with .Docker}}Docker {{.}} · {{end}}no container list yet</span>
+    {{else}}<span class="chip">{{len .Rows}} containers</span>
+    <span class="chip{{if .Available}} accent{{end}}">{{.Available}} with an update</span>
+    <span class="muted small">{{with .Docker}}Docker {{.}} · {{end}}checked {{ago .AsOf}}</span>{{end}}
   </div>
   {{if .Issue}}<p class="msg bad">{{.Issue}} <span class="muted">({{ago .IssueAt}})</span></p>{{end}}
   {{if .Shown}}{{template "ctable" (rows .Shown false)}}

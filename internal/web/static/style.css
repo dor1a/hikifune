@@ -240,11 +240,21 @@ td.host { overflow-wrap: anywhere; }
 .seg a { padding: 4px 12px; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: 13.5px; font-weight: 600; }
 .seg a[aria-current="true"] { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
 
-.group { margin-bottom: 22px; }
-.group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; }
-.group-head h2 { margin: 0; font-size: 16px; }
+/* By host: each host a card with a band on top, so the per-host tables do
+   not run into one another. */
+.group { margin-bottom: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+.group-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 12px 16px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.group-head h2 { margin: 0 4px 0 0; font-size: 17px; min-width: 0; overflow-wrap: anywhere; }
+/* On the band the light colors alone are too faint: text mixed toward the ink, a list not yet
+   read in the muted color instead of the border's. */
+.group-head .dot.never { background: var(--muted); }
+.group-head .tag.warn { color: color-mix(in srgb, var(--warn) 60%, var(--text)); }
 .group-head h2 a { color: var(--text); text-decoration: none; }
 .group-head h2 a:hover { color: var(--accent); }
+.group table.list { border: 0; border-radius: 0; box-shadow: none; }
+.group > .msg, .group > .card { margin: 12px 16px; }
+.chip { display: inline-flex; align-items: center; padding: 1px 9px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.chip.accent { background: var(--accent-weak); border-color: transparent; color: color-mix(in srgb, var(--accent) 65%, var(--text)); }
 
 .facts { display: grid; gap: 8px; margin: 0 0 16px; }
 .facts div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; align-items: baseline; }
